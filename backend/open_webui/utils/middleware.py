@@ -767,6 +767,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
 
     tool_ids = form_data.pop("tool_ids", None)
     files = form_data.pop("files", None)
+
     # Remove files duplicates
     if files:
         files = list({json.dumps(f, sort_keys=True): f for f in files}.values())
@@ -860,6 +861,7 @@ async def process_chat_payload(request, form_data, metadata, user, model):
                 },
             }
         )
+    log.debug("QQQ user_message:" + user_message)
 
     return form_data, events
 

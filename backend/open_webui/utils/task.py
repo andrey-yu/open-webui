@@ -176,6 +176,8 @@ def rag_template(template: str, context: str, query: str):
 
     for query_placeholder in query_placeholders:
         template = template.replace(query_placeholder, query)
+    
+    log.debug(f"rag_template: {template}")
 
     return template
 

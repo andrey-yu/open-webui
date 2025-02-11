@@ -11,6 +11,8 @@ from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriev
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
+import traceback
+
 
 from open_webui.config import VECTOR_DB
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
@@ -127,8 +129,13 @@ def query_doc_with_hybrid_search(
 
         log.info(
             "query_doc_with_hybrid_search:result "
-            + f'{result["metadatas"]} {result["distances"]}'
+            + f'{result["metadatas"]}\n{result["distances"]}\n{result["documents"]}'
         )
+
+        log.debug("QQQ query:" + query)
+
+        #traceback.print_stack()
+
         return result
     except Exception as e:
         raise e
@@ -290,7 +297,7 @@ def get_sources_from_files(
     r,
     hybrid_search,
 ):
-    log.debug(f"files: {files} {queries} {embedding_function} {reranking_function}")
+    log.debug(f"files: {files.count} {queries} {embedding_function} {reranking_function}")
 
     extracted_collections = []
     relevant_contexts = []

@@ -26,5 +26,8 @@ export default defineConfig({
 	},
 	worker: {
 		format: 'es'
-	}
+	},
+	server: {
+		allowedHosts: ['chat.keepmystuff.net', 'localhost'], 
+	},
 });

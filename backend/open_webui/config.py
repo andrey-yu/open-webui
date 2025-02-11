@@ -1030,6 +1030,7 @@ def validate_cors_origin(origin):
 # CORS_ALLOW_ORIGIN=http://localhost:5173;http://localhost:8080
 # in your .env file depending on your frontend port, 5173 in this case.
 CORS_ALLOW_ORIGIN = os.environ.get("CORS_ALLOW_ORIGIN", "*").split(";")
+##CORS_ALLOW_ORIGIN = "https://chat.keepmystuff.net;https://backend.keepmystuff.net".split(";")
 
 if "*" in CORS_ALLOW_ORIGIN:
     log.warning(

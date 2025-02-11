@@ -36,7 +36,7 @@ from fastapi import (
 from fastapi.openapi.docs import get_swagger_ui_html
 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -735,6 +735,7 @@ async def inspect_websocket(request: Request, call_next):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ALLOW_ORIGIN,
+    #allow_origins="*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -881,6 +882,7 @@ async def chat_completion(
         form_data, events = await process_chat_payload(
             request, form_data, metadata, user, model
         )
+        #print(form_data)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1173,10 +1175,59 @@ async def healthcheck_with_db():
     Session.execute(text("SELECT 1;")).all()
     return {"status": True}
 
+# Manually adding CORS headers for the static files
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    response = await call_next(request)
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    #log.info(f"QQQ checking CORS headers")
+    
+    # Adding CORS headers to all responses (you can adjust this based on your needs)
+    if "Access-Control-Allow-Origin" not in response.headers:
+        referer = request.headers.get("referer")
+        #log.info(f"QQQ match request.headers : {request.headers}")
+        log.info(f"QQQ match request origin : {referer}")
+        log.info(f"QQQ match CORS_ALLOW_ORIGIN: {CORS_ALLOW_ORIGIN}")
+        match = next(((i, host) for i, host in enumerate(CORS_ALLOW_ORIGIN) 
+                      if referer in host or host in referer ), None)
+        log.info(f"QQQ match: {match}")
+        if match:
+            index, matched_host = match
+            log.info(f"QQQ matched_host: {matched_host}")
+            response.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN[index]
+            #response.headers["Access-Control-Allow-Origin"] = "*"
+            #log.info(f"QQQ Added CORS headers: {response.headers['Access-Control-Allow-Origin']}")
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    
+    return response
+
+# Custom route to serve static files with explicit CORS headers
+#@app.get("/static/{file_name}")
+async def serve_static(file_name: str, response: Response):
+    log.info(
+        f"QQQ Serving'{file_name}'"
+    )
+    file_path = os.path.join(STATIC_DIR, file_name)
+    log.info(f"QQQ file_path '{file_path}'")
+    if os.path.exists(file_path):
+        #response.headers["Access-Control-Allow-Origin"] = "*"
+        #response.headers["Access-Control-Allow-Credentials"] = "true"
+        #response.headers["Access-Control-Allow-Methods"] = "*"
+        #response.headers["Access-Control-Allow-Headers"] = "*"
+
+        log.info(f"QQQ found'{file_name}' returning")
+    
+        return FileResponse(file_path)
+    
+    else:
+        log.info(f"QQQ not exist '{file_name}'")
+        return {"error": "File not found"}
+
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 app.mount("/cache", StaticFiles(directory=CACHE_DIR), name="cache")
-
 
 def swagger_ui_html(*args, **kwargs):
     return get_swagger_ui_html(
@@ -1199,5 +1250,5 @@ if os.path.exists(FRONTEND_BUILD_DIR):
     )
 else:
     log.warning(
-        f"Frontend build directory not found at '{FRONTEND_BUILD_DIR}'. Serving API only."
+        f"QQQ Frontend build directory not found at '{FRONTEND_BUILD_DIR}'. Serving API only."
     )

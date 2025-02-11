@@ -243,16 +243,32 @@
 
 		theme.set(localStorage.theme);
 
+		let vh = window.innerHeight; // Store initial height
+
 		mobile.set(window.innerWidth < BREAKPOINT);
 		const onResize = () => {
 			if (window.innerWidth < BREAKPOINT) {
 				mobile.set(true);
+				console.log('QQQ mobile set true')
+				vh = window.visualViewport.height;
+    			//document.documentElement.style.setProperty("--vh", `${vh}px`);
+				document.documentElement.style.setProperty("--vh", `300px`);
+				console.log('QQQ window.visualViewport.height: ' + window.visualViewport.height)
+				console.log('QQQ mobile set true 2')
+				//toast.error('vVph: ' + window.visualViewport.height + ' ddch: ' + document.documentElement.clientHeight);
+				
 			} else {
 				mobile.set(false);
+				console.log('QQQ mobile set true')
 			}
 		};
 
 		window.addEventListener('resize', onResize);
+
+		if ('serviceWorker' in navigator) {
+			console.log('QQQ serviceWorker')
+			navigator.serviceWorker.register('/sw.js', { scope: '/' });
+		}
 
 		let backendConfig = null;
 		try {
@@ -358,7 +374,7 @@
 
 <svelte:head>
 	<title>{$WEBUI_NAME}</title>
-	<link crossorigin="anonymous" rel="icon" href="{WEBUI_BASE_URL}/static/favicon.png" />
+	<link crossorigin="use-credentials" rel="icon" href="{WEBUI_BASE_URL}/static/favicon.png" />
 
 	<!-- rosepine themes have been disabled as it's not up to date with our latest version. -->
 	<!-- feel free to make a PR to fix if anyone wants to see it return -->

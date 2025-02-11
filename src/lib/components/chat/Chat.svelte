@@ -386,6 +386,21 @@
 	onMount(async () => {
 		console.log('mounted');
 		window.addEventListener('message', onMessageHandler);
+		const BREAKPOINT = 768;
+		const onResize = () => {
+			if (window.innerWidth < BREAKPOINT) {
+				console.log('QQQ mobile set true')
+				vh = window.visualViewport.height;
+    			//document.documentElement.style.setProperty("--vh", `${vh}px`);
+//				document.documentElement.style.setProperty("--vh", `300px`);
+				console.log('QQQ window.visualViewport.height: ' + window.visualViewport.height)
+				console.log('QQQ mobile set true 2')
+				//toast.error('vVph: ' + window.visualViewport.height + ' ddch: ' + document.documentElement.clientHeight);				
+			}
+		};
+
+		window.addEventListener('resize', onResize);
+
 		$socket?.on('chat-events', chatEventHandler);
 
 		if (!$chatId) {
@@ -819,8 +834,19 @@
 
 	const scrollToBottom = async () => {
 		await tick();
+		const BREAKPOINT = 768;
+		if (window.innerWidth < BREAKPOINT) {
+			const chatInput = document.getElementById('chat-input');
+			//console.log("focus 15 " + chatInput)
+			setTimeout(() => chatInput?.blur(), 0);
+		}
+		console.log('messagesContainerElement: ' + messagesContainerElement)
 		if (messagesContainerElement) {
 			messagesContainerElement.scrollTop = messagesContainerElement.scrollHeight;
+			//console.log('messagesContainerElement.scrollTop: ' + messagesContainerElement.scrollTop)
+			//console.log('messagesContainerElement.scrollHeight: ' + messagesContainerElement.scrollHeight)
+			//console.log('messagesContainerElement.clientHeight: ' + messagesContainerElement.clientHeight)
+			//console.log('QQQ window.visualViewport.height: ' + window.visualViewport.height)
 		}
 	};
 
@@ -1318,8 +1344,16 @@
 
 		// focus on chat input
 		const chatInput = document.getElementById('chat-input');
-		chatInput?.focus();
-
+		console.log("focus 1 " + chatInput)
+		const BREAKPOINT = 768;
+		if (window.innerWidth < BREAKPOINT) {
+			const chatInput = document.getElementById('chat-input');
+			//console.log("focus 16 " + chatInput)
+			setTimeout(() => chatInput?.blur(), 0);
+		} else {
+			chatInput?.focus();
+		}
+		//chatInput?.blur();
 		saveSessionSelectedModels();
 
 		await sendPrompt(userPrompt, userMessageId, { newChat: true });
@@ -1442,7 +1476,6 @@
 
 					scrollToBottom();
 					await sendPromptSocket(model, responseMessageId, _chatId);
-
 					if (chatEventEmitter) clearInterval(chatEventEmitter);
 				} else {
 					toast.error($i18n.t(`Model {{modelId}} not found`, { modelId }));
@@ -1924,7 +1957,7 @@
 				<div class="flex flex-col flex-auto z-10 w-full">
 					{#if $settings?.landingPageMode === 'chat' || createMessagesList(history.currentId).length > 0}
 						<div
-							class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
+							class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto max-w-full z-10 scrollbar-hidden"
 							id="messages-container"
 							bind:this={messagesContainerElement}
 							on:scroll={(e) => {
