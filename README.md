@@ -195,6 +195,30 @@ If you are running Open WebUI in an offline environment, you can set the `HF_HUB
 export HF_HUB_OFFLINE=1
 ```
 
+### Development Mode
+
+Set the port for backend to 8083 in dev.sh
+
+```bash
+cd path_to_top/backend
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+sh dev.sh
+
+```
+Backend is at http://localhost:8083
+
+```bash
+cd path_to_top
+cp .env.example .env
+npm run dev
+
+```
+Frontend available at: http://localhost:5173.
+
+If you are changing port the CORS may fail, then update the CORS_ALLOW_ORIGIN in the .env file with the correct port.
+
 ## What's Next? 🌟
 
 Discover upcoming features on our roadmap in the [Open WebUI Documentation](https://docs.openwebui.com/roadmap/).
