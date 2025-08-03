@@ -5,6 +5,7 @@ node_modules
 /package
 .env
 .env.*
+gcloud-env*.yaml*
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*

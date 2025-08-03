@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui-cloud-run
+    ports:
+      - "8080:8080"  # Cloud Run expects port 8080
+    environment:
+      # Database Configuration (Supabase)
+      - DATABASE_URL=${DATABASE_URL}
+      # Alternative: Use individual database variables
+      # - DATABASE_TYPE=postgresql
+      # - DATABASE_USER=${DATABASE_USER}
+      # - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      # - DATABASE_HOST=${DATABASE_HOST}
+      # - DATABASE_PORT=${DATABASE_PORT}
+      # - DATABASE_NAME=${DATABASE_NAME}
+      
+      # Database Connection Pooling (recommended for production)
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
+      - DATABASE_POOL_MAX_OVERFLOW=${DATABASE_POOL_MAX_OVERFLOW:-20}
+      - DATABASE_POOL_TIMEOUT=${DATABASE_POOL_TIMEOUT:-30}
+      - DATABASE_POOL_RECYCLE=${DATABASE_POOL_RECYCLE:-3600}
+      
+      # OpenAI API Configuration
+      - ENABLE_OPENAI_API=true
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      
+      # Security Configuration
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=${ENABLE_SIGNUP:-true}
+      
+      # Disable Ollama (since we're using OpenAI)
+      - ENABLE_OLLAMA_API=false
+      
+      # WebUI Configuration
+      - WEBUI_URL=${WEBUI_URL}
+      - WEBUI_NAME=${WEBUI_NAME:-Open WebUI}
+      
+      # Redis Configuration (optional, for session management)
+      - REDIS_URL=${REDIS_URL}
+      
+      # Performance and Caching
+      - ENABLE_BASE_MODELS_CACHE=${ENABLE_BASE_MODELS_CACHE:-true}
+      - ENABLE_REALTIME_CHAT_SAVE=${ENABLE_REALTIME_CHAT_SAVE:-true}
+      
+      # Image Generation (optional)
+      - IMAGES_OPENAI_API_KEY=${IMAGES_OPENAI_API_KEY:-${OPENAI_API_KEY}}
+      - IMAGES_OPENAI_API_BASE_URL=${IMAGES_OPENAI_API_BASE_URL:-${OPENAI_API_BASE_URL:-https://api.openai.com/v1}}
+      
+      # Audio Configuration (optional)
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      
+      # RAG Configuration (optional)
+      - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - RAG_RERANKING_MODEL=${RAG_RERANKING_MODEL:-ms-marco-MiniLM-L-12-v2}
+      
+      # Vector Database (optional - can use Supabase with pgvector)
+      - PGVECTOR_DB_URL=${PGVECTOR_DB_URL:-${DATABASE_URL}}
+      
+      # Telemetry and Analytics (disable for privacy)
+      - SCARF_NO_ANALYTICS=true
+      - DO_NOT_TRACK=true
+      - ANONYMIZED_TELEMETRY=false
+      
+      # Logging
+      - GLOBAL_LOG_LEVEL=${GLOBAL_LOG_LEVEL:-INFO}
+      
+      # Uvicorn Workers (for Cloud Run, keep at 1)
+      - UVICORN_WORKERS=1
+      
+    # Cloud Run specific configurations
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Resource limits (adjust based on your Cloud Run configuration)
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+# Note: No volumes needed for Cloud Run as it's stateless
+# Data will be stored in the external Supabase database 
