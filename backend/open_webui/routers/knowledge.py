@@ -997,6 +997,15 @@ async def process_google_drive_file_complete(
                     user=mock_user,
                 )
                 
+                # Clean up local files after successful processing
+                # Keep GCS files and DB entries, remove only local files
+                try:
+                    from open_webui.storage.provider import LocalStorageProvider
+                    LocalStorageProvider.delete_file_and_related(file_path)
+                    log.info(f"Cleaned up local files for {file.id} after successful processing")
+                except Exception as cleanup_error:
+                    log.warning(f"Failed to clean up local files for {file.id}: {cleanup_error}")
+                
                 # Update progress to show completion
                 update_progress(session_id, {
                     "session_id": session_id,
@@ -1041,6 +1050,15 @@ async def process_google_drive_file_complete(
                 ProcessFileForm(file_id=file.id, collection_name=knowledge_id),
                 user=mock_user,
             )
+            
+            # Clean up local files after successful processing
+            # Keep GCS files and DB entries, remove only local files
+            try:
+                from open_webui.storage.provider import LocalStorageProvider
+                LocalStorageProvider.delete_file_and_related(file_path)
+                log.info(f"Cleaned up local files for {file.id} after successful processing")
+            except Exception as cleanup_error:
+                log.warning(f"Failed to clean up local files for {file.id}: {cleanup_error}")
             
             update_progress(session_id, {
                 "session_id": session_id,
@@ -1290,6 +1308,15 @@ async def process_transcription_completion(
             log.info(f"Updated file content for {file_id}")
         
         log.info(f"Processing completed for file {file_id}")
+        
+        # Clean up local files after successful processing
+        # Keep GCS files and DB entries, remove only local files
+        try:
+            from open_webui.storage.provider import LocalStorageProvider
+            LocalStorageProvider.delete_file_and_related(file_path)
+            log.info(f"Cleaned up local files for {file_id} after successful processing")
+        except Exception as cleanup_error:
+            log.warning(f"Failed to clean up local files for {file_id}: {cleanup_error}")
         
         # Update progress to show completion
         update_progress(session_id, {
@@ -1683,6 +1710,16 @@ async def add_google_drive_folder_to_knowledge(
                                 log.info(f"Updated file content for {storage_file_id}")
                             
                             log.info(f"Processing completed for file {storage_file_id}")
+                            
+                            # Clean up local files after successful processing
+                            # Keep GCS files and DB entries, remove only local files
+                            try:
+                                from open_webui.storage.provider import LocalStorageProvider
+                                LocalStorageProvider.delete_file_and_related(file_path)
+                                log.info(f"Cleaned up local files for {storage_file_id} after successful processing")
+                            except Exception as cleanup_error:
+                                log.warning(f"Failed to clean up local files for {storage_file_id}: {cleanup_error}")
+                                
                         except Exception as process_error:
                             log.error(f"Error processing file {storage_file_id} with transcription: {str(process_error)}")
                             raise ValueError(f"Failed to process transcribed content: {str(process_error)}")
@@ -1710,6 +1747,16 @@ async def add_google_drive_folder_to_knowledge(
                                 ProcessFileForm(file_id=storage_file_id, collection_name=id),
                                 user=user,
                             )
+                            
+                            # Clean up local files after successful processing
+                            # Keep GCS files and DB entries, remove only local files
+                            try:
+                                from open_webui.storage.provider import LocalStorageProvider
+                                LocalStorageProvider.delete_file_and_related(file_path)
+                                log.info(f"Cleaned up local files for {storage_file_id} after successful processing")
+                            except Exception as cleanup_error:
+                                log.warning(f"Failed to clean up local files for {storage_file_id}: {cleanup_error}")
+                                
                         except Exception as process_error:
                             log.error(f"Error processing file {storage_file_id}: {str(process_error)}")
                             
