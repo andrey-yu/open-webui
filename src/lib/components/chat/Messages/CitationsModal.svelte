@@ -59,8 +59,8 @@
 			   fileName.toLowerCase().match(/\.(mp4|webm|avi|mov|mkv|flv|wmv|3gp|ogv)$/);
 	}
 
-	function playAudioSegment(fileId: string, startTime: number, endTime: number) {
-		const audioElement = document.getElementById(`audio-${fileId}`) as HTMLAudioElement;
+	function playAudioSegment(elementId: string, startTime: number, endTime: number) {
+		const audioElement = document.getElementById(elementId) as HTMLAudioElement;
 		if (audioElement) {
 			audioElement.currentTime = startTime;
 			audioElement.play();
@@ -76,8 +76,8 @@
 		}
 	}
 
-	function jumpToAudioTime(fileId: string, time: number) {
-		const audioElement = document.getElementById(`audio-${fileId}`) as HTMLAudioElement;
+	function jumpToAudioTime(elementId: string, time: number) {
+		const audioElement = document.getElementById(elementId) as HTMLAudioElement;
 		if (audioElement) {
 			audioElement.currentTime = time;
 		}
@@ -115,11 +115,12 @@
 	function handleTimestampClick(event: CustomEvent) {
 		const { start, end, source } = event.detail;
 		// Handle audio elements in the modal
-		mergedDocuments.forEach((doc) => {
+		mergedDocuments.forEach((doc, index) => {
 			if (isAudioFile(doc) && doc.metadata?.file_id) {
-				const audioElement = document.getElementById(`audio-${doc.metadata.file_id}`) as HTMLAudioElement;
+				const elementId = `audio-${doc.metadata.file_id}-${index}`;
+				const audioElement = document.getElementById(elementId) as HTMLAudioElement;
 				if (audioElement) {
-					playAudioSegment(doc.metadata.file_id, start, end);
+					playAudioSegment(elementId, start, end);
 				}
 			}
 		});
@@ -280,27 +281,27 @@
 								<div class="audio-controls mb-2 flex items-center gap-2">
 									<button
 										class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition"
-										on:click={() => playAudioSegment(document.metadata.file_id, document.metadata.timestamp_start, document.metadata.timestamp_end)}
+										on:click={() => playAudioSegment(`audio-${document.metadata.file_id}-${documentIdx}`, document.metadata.timestamp_start, document.metadata.timestamp_end)}
 									>
 										▶ Play Segment ({formatTimestamp(document.metadata.timestamp_start)} - {formatTimestamp(document.metadata.timestamp_end)})
 									</button>
 									<button
 										class="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 transition"
-										on:click={() => jumpToAudioTime(document.metadata.file_id, document.metadata.timestamp_start)}
+										on:click={() => jumpToAudioTime(`audio-${document.metadata.file_id}-${documentIdx}`, document.metadata.timestamp_start)}
 									>
 										⏭ Jump to {formatTimestamp(document.metadata.timestamp_start)}
 									</button>
 									{#if document.metadata.timestamp_end}
 										<button
 											class="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 transition"
-											on:click={() => jumpToAudioTime(document.metadata.file_id, document.metadata.timestamp_end)}
+											on:click={() => jumpToAudioTime(`audio-${document.metadata.file_id}-${documentIdx}`, document.metadata.timestamp_end)}
 										>
 											⏭ Jump to {formatTimestamp(document.metadata.timestamp_end)}
 										</button>
 									{/if}
 								</div>
 								<audio
-									id="audio-{document.metadata.file_id}"
+									id="audio-{document.metadata.file_id}-{documentIdx}"
 									class="w-full"
 									controls
 									preload="metadata"
