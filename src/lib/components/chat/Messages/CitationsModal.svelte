@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { getContext, onMount, tick } from 'svelte';
+	import { getContext, onMount, tick, onDestroy } from 'svelte';
 	import Modal from '$lib/components/common/Modal.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import VideoPlayer from './VideoPlayer.svelte';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	import XMark from '$lib/components/icons/XMark.svelte';
@@ -32,6 +33,68 @@
 		return 'bg-red-200 dark:bg-red-800 text-red-800 dark:text-red-200';
 	}
 
+	function formatTimestamp(seconds: number): string {
+		const minutes = Math.floor(seconds / 60);
+		const remainingSeconds = Math.floor(seconds % 60);
+		return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+	}
+
+	function hasTimestampInfo(document: any): boolean {
+		return document.metadata?.timestamp_start !== undefined && document.metadata?.timestamp_end !== undefined;
+	}
+
+	function isAudioFile(document: any): boolean {
+		const contentType = document.metadata?.content_type || '';
+		const fileName = document.metadata?.name || '';
+		
+		return contentType.startsWith('audio/') || 
+			   fileName.toLowerCase().match(/\.(mp3|wav|ogg|m4a|webm|flac|aac)$/);
+	}
+
+	function isVideoFile(document: any): boolean {
+		const contentType = document.metadata?.content_type || '';
+		const fileName = document.metadata?.name || '';
+		
+		return contentType.startsWith('video/') || 
+			   fileName.toLowerCase().match(/\.(mp4|webm|avi|mov|mkv|flv|wmv|3gp|ogv)$/);
+	}
+
+	function playAudioSegment(fileId: string, startTime: number, endTime: number) {
+		const audioElement = document.getElementById(`audio-${fileId}`) as HTMLAudioElement;
+		if (audioElement) {
+			audioElement.currentTime = startTime;
+			audioElement.play();
+			
+			// Auto-pause at end time if specified
+			const timeUpdateHandler = () => {
+				if (audioElement.currentTime >= endTime) {
+					audioElement.pause();
+					audioElement.removeEventListener('timeupdate', timeUpdateHandler);
+				}
+			};
+			audioElement.addEventListener('timeupdate', timeUpdateHandler);
+		}
+	}
+
+	function jumpToAudioTime(fileId: string, time: number) {
+		const audioElement = document.getElementById(`audio-${fileId}`) as HTMLAudioElement;
+		if (audioElement) {
+			audioElement.currentTime = time;
+		}
+	}
+
+	function jumpToTimestamp(startTime: number, endTime: number) {
+		// This function is used for the timestamp button in the source section
+		// It will trigger a custom event that the video/audio player can listen to
+		window.dispatchEvent(new CustomEvent('timestampClick', {
+			detail: {
+				start: startTime,
+				end: endTime,
+				source: { id: 'citation-modal' }
+			}
+		}));
+	}
+
 	$: if (citation) {
 		mergedDocuments = citation.document?.map((c, i) => {
 			return {
@@ -47,6 +110,28 @@
 			);
 		}
 	}
+
+	// Listen for timestamp click events for audio elements
+	function handleTimestampClick(event: CustomEvent) {
+		const { start, end, source } = event.detail;
+		// Handle audio elements in the modal
+		mergedDocuments.forEach((doc) => {
+			if (isAudioFile(doc) && doc.metadata?.file_id) {
+				const audioElement = document.getElementById(`audio-${doc.metadata.file_id}`) as HTMLAudioElement;
+				if (audioElement) {
+					playAudioSegment(doc.metadata.file_id, start, end);
+				}
+			}
+		});
+	}
+
+	onMount(() => {
+		window.addEventListener('timestampClick', handleTimestampClick);
+	});
+
+	onDestroy(() => {
+		window.removeEventListener('timestampClick', handleTimestampClick);
+	});
 
 	const decodeString = (str: string) => {
 		try {
@@ -108,6 +193,18 @@
 											{document.metadata.page + 1})
 										</span>
 									{/if}
+									{#if hasTimestampInfo(document)}
+										<span class="text-xs text-blue-600 dark:text-blue-400 ml-2">
+											({formatTimestamp(document.metadata.timestamp_start)} - {formatTimestamp(document.metadata.timestamp_end)})
+										</span>
+										<button
+											class="ml-2 p-1 text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition rounded"
+											on:click={() => jumpToTimestamp(document.metadata.timestamp_start, document.metadata.timestamp_end)}
+											title="Jump to timestamp"
+										>
+											▶ {$i18n.t('Play')}
+										</button>
+									{/if}
 								</div>
 							</Tooltip>
 							{#if document.metadata?.parameters}
@@ -168,6 +265,72 @@
 							</div>
 						{/if}
 					</div>
+					{#if hasTimestampInfo(document) && document?.metadata?.file_id}
+						<div class="text-sm font-medium dark:text-gray-300 mt-2">
+							{#if isAudioFile(document)}
+								Audio Player
+							{:else if isVideoFile(document)}
+								Video Player
+							{:else}
+								Media Player
+							{/if}
+						</div>
+						{#if isAudioFile(document)}
+							<div class="audio-player-container">
+								<div class="audio-controls mb-2 flex items-center gap-2">
+									<button
+										class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+										on:click={() => playAudioSegment(document.metadata.file_id, document.metadata.timestamp_start, document.metadata.timestamp_end)}
+									>
+										▶ Play Segment ({formatTimestamp(document.metadata.timestamp_start)} - {formatTimestamp(document.metadata.timestamp_end)})
+									</button>
+									<button
+										class="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 transition"
+										on:click={() => jumpToAudioTime(document.metadata.file_id, document.metadata.timestamp_start)}
+									>
+										⏭ Jump to {formatTimestamp(document.metadata.timestamp_start)}
+									</button>
+									{#if document.metadata.timestamp_end}
+										<button
+											class="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 transition"
+											on:click={() => jumpToAudioTime(document.metadata.file_id, document.metadata.timestamp_end)}
+										>
+											⏭ Jump to {formatTimestamp(document.metadata.timestamp_end)}
+										</button>
+									{/if}
+								</div>
+								<audio
+									id="audio-{document.metadata.file_id}"
+									class="w-full"
+									controls
+									preload="metadata"
+									src={`${WEBUI_API_BASE_URL}/files/${document.metadata.file_id}/content`}
+								>
+									Your browser does not support the audio tag.
+								</audio>
+								<div class="audio-info mt-2 text-sm text-gray-600 dark:text-gray-400">
+									<div>Segment: {formatTimestamp(document.metadata.timestamp_start)} - {formatTimestamp(document.metadata.timestamp_end)}</div>
+									{#if document.metadata.timestamp_end}
+										<div>Segment Duration: {formatTimestamp(document.metadata.timestamp_end - document.metadata.timestamp_start)}</div>
+									{/if}
+								</div>
+							</div>
+						{:else if isVideoFile(document)}
+							<VideoPlayer
+								fileId={document.metadata.file_id}
+								startTime={document.metadata.timestamp_start}
+								endTime={document.metadata.timestamp_end}
+								autoPlay={false}
+							/>
+						{:else}
+							<VideoPlayer
+								fileId={document.metadata.file_id}
+								startTime={document.metadata.timestamp_start}
+								endTime={document.metadata.timestamp_end}
+								autoPlay={false}
+							/>
+						{/if}
+					{/if}
 					<div class="flex flex-col w-full">
 						<div class=" text-sm font-medium dark:text-gray-300 mt-2">
 							{$i18n.t('Content')}
@@ -194,3 +357,13 @@
 		</div>
 	</div>
 </Modal>
+
+<style>
+	.audio-player-container {
+		max-width: 100%;
+	}
+	
+	.audio-player-container audio {
+		border-radius: 0.375rem;
+	}
+</style>

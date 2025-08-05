@@ -42,6 +42,44 @@
 		return distances.every((d) => d !== undefined && d >= -1 && d <= 1);
 	}
 
+	function formatTimestamp(seconds: number): string {
+		const minutes = Math.floor(seconds / 60);
+		const remainingSeconds = Math.floor(seconds % 60);
+		return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+	}
+
+	function hasTimestampInfo(citation: any): boolean {
+		return citation.metadata?.some((meta: any) => 
+			meta.timestamp_start !== undefined && meta.timestamp_end !== undefined
+		);
+	}
+
+	function getTimestampInfo(citation: any): { start: number; end: number } | null {
+		const metadata = citation.metadata?.[0];
+		if (metadata?.timestamp_start !== undefined && metadata?.timestamp_end !== undefined) {
+			return {
+				start: metadata.timestamp_start,
+				end: metadata.timestamp_end
+			};
+		}
+		return null;
+	}
+
+	function handleTimestampClick(citation: any) {
+		const timestampInfo = getTimestampInfo(citation);
+		if (timestampInfo) {
+			// Dispatch custom event for video player to handle
+			const event = new CustomEvent('timestampClick', {
+				detail: {
+					start: timestampInfo.start,
+					end: timestampInfo.end,
+					source: citation.source
+				}
+			});
+			window.dispatchEvent(event);
+		}
+	}
+
 	$: {
 		citations = sources.reduce((acc, source) => {
 			if (Object.keys(source).length === 0) {
@@ -126,7 +164,24 @@
 							class="flex-1 mx-1 truncate text-black/60 hover:text-black dark:text-white/60 dark:hover:text-white transition"
 						>
 							{decodeString(citation.source.name)}
+							{#if hasTimestampInfo(citation)}
+								<span class="text-blue-600 dark:text-blue-400 ml-1">
+									({formatTimestamp(getTimestampInfo(citation)?.start || 0)})
+								</span>
+							{/if}
 						</div>
+						{#if hasTimestampInfo(citation)}
+							<button
+								class="ml-1 p-0.5 text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition"
+								on:click={(e) => {
+									e.stopPropagation();
+									handleTimestampClick(citation);
+								}}
+								title="Jump to timestamp"
+							>
+								▶
+							</button>
+						{/if}
 					</button>
 				{/each}
 			</div>
@@ -166,7 +221,24 @@
 										{/if}
 										<div class="flex-1 mx-1 truncate">
 											{decodeString(citation.source.name)}
+											{#if hasTimestampInfo(citation)}
+												<span class="text-blue-600 dark:text-blue-400 ml-1">
+													({formatTimestamp(getTimestampInfo(citation)?.start || 0)})
+												</span>
+											{/if}
 										</div>
+										{#if hasTimestampInfo(citation)}
+											<button
+												class="ml-1 p-0.5 text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition"
+												on:click={(e) => {
+													e.stopPropagation();
+													handleTimestampClick(citation);
+												}}
+												title="Jump to timestamp"
+											>
+												▶
+											</button>
+										{/if}
 									</button>
 								{/each}
 							</div>
@@ -202,7 +274,24 @@
 								{/if}
 								<div class="flex-1 mx-1 truncate">
 									{decodeString(citation.source.name)}
+									{#if hasTimestampInfo(citation)}
+										<span class="text-blue-600 dark:text-blue-400 ml-1">
+											({formatTimestamp(getTimestampInfo(citation)?.start || 0)})
+										</span>
+									{/if}
 								</div>
+								{#if hasTimestampInfo(citation)}
+									<button
+										class="ml-1 p-0.5 text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 transition"
+										on:click={(e) => {
+											e.stopPropagation();
+											handleTimestampClick(citation);
+										}}
+										title="Jump to timestamp"
+									>
+										▶
+									</button>
+								{/if}
 							</button>
 						{/each}
 					</div>

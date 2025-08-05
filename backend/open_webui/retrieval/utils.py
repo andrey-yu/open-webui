@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Optional, Union
+from typing import Optional, Union, Any, Callable, Dict, List
 
 import requests
 import hashlib
@@ -12,6 +12,7 @@ from huggingface_hub import snapshot_download
 from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from open_webui.config import VECTOR_DB
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
@@ -40,10 +41,109 @@ log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
 
 
-from typing import Any
-
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.retrievers import BaseRetriever
+
+
+class TimestampAwareTextSplitter(RecursiveCharacterTextSplitter):
+    """
+    A text splitter that preserves timestamp information from audio/video transcriptions.
+    This splitter works with documents that have segments with timestamp metadata.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Ensure chunk_size and chunk_overlap are set as instance attributes
+        self.chunk_size = kwargs.get('chunk_size', 1000)
+        self.chunk_overlap = kwargs.get('chunk_overlap', 200)
+
+    def split_documents(self, documents: List[Document]) -> List[Document]:
+        """
+        Split documents while preserving timestamp information.
+        If the document has segments with timestamps, it will create chunks that maintain
+        the timestamp boundaries as much as possible.
+        """
+        split_docs = []
+
+        for doc in documents:
+            # Check if this document has timestamp segments
+            segments = doc.metadata.get("segments", [])
+
+            if segments and isinstance(segments, list):
+                # Process document with timestamp segments
+                split_docs.extend(self._split_with_timestamps(doc, segments))
+            else:
+                # Use regular text splitting for documents without timestamps
+                split_docs.extend(super().split_documents([doc]))
+
+        return split_docs
+
+    def _split_with_timestamps(self, doc: Document, segments: List[dict]) -> List[Document]:
+        """
+        Split a document that has timestamp segments while preserving timestamp information.
+        """
+        chunks = []
+        current_chunk_text = ""
+        current_chunk_segments = []
+        current_chunk_start = None
+        current_chunk_end = None
+
+        for segment in segments:
+            segment_text = segment.get("text", "").strip()
+            segment_start = segment.get("start", 0)
+            segment_end = segment.get("end", 0)
+
+            if not segment_text:
+                continue
+
+            # Check if adding this segment would exceed chunk size
+            test_text = current_chunk_text + " " + segment_text if current_chunk_text else segment_text
+
+            if len(test_text) <= self.chunk_size or not current_chunk_text:
+                # Add to current chunk
+                current_chunk_text = test_text
+                current_chunk_segments.append(segment)
+                if current_chunk_start is None:
+                    current_chunk_start = segment_start
+                current_chunk_end = segment_end
+            else:
+                # Create a new chunk with current content
+                if current_chunk_text:
+                    chunk_metadata = doc.metadata.copy()
+                    chunk_metadata.update({
+                        "timestamp_start": current_chunk_start,
+                        "timestamp_end": current_chunk_end,
+                        "segment_count": len(current_chunk_segments),
+                        "segments": current_chunk_segments
+                    })
+
+                    chunks.append(Document(
+                        page_content=current_chunk_text.strip(),
+                        metadata=chunk_metadata
+                    ))
+
+                # Start new chunk with current segment
+                current_chunk_text = segment_text
+                current_chunk_segments = [segment]
+                current_chunk_start = segment_start
+                current_chunk_end = segment_end
+
+        # Add the last chunk if it has content
+        if current_chunk_text:
+            chunk_metadata = doc.metadata.copy()
+            chunk_metadata.update({
+                "timestamp_start": current_chunk_start,
+                "timestamp_end": current_chunk_end,
+                "segment_count": len(current_chunk_segments),
+                "segments": current_chunk_segments
+            })
+
+            chunks.append(Document(
+                page_content=current_chunk_text.strip(),
+                metadata=chunk_metadata
+            ))
+
+        return chunks
 
 
 class VectorSearchRetriever(BaseRetriever):

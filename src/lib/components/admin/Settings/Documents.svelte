@@ -630,6 +630,23 @@
 						</div>
 					</div>
 
+					<div class="  mb-2.5 flex w-full justify-between">
+						<div class=" self-center text-xs font-medium">{$i18n.t('Enable Timestamp Citations')}</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={RAGConfig.ENABLE_TIMESTAMP_CITATIONS
+									? $i18n.t(
+											'Inject timestamp citations into the context for more accurate retrieval.'
+										)
+									: $i18n.t(
+											'Do not inject timestamp citations into the context. This is recommended for general queries.'
+										)}
+							>
+								<Switch bind:state={RAGConfig.ENABLE_TIMESTAMP_CITATIONS} />
+							</Tooltip>
+						</div>
+					</div>
+
 					{#if !RAGConfig.BYPASS_EMBEDDING_AND_RETRIEVAL}
 						<div class="  mb-2.5 flex w-full justify-between">
 							<div class=" self-center text-xs font-medium">{$i18n.t('Text Splitter')}</div>

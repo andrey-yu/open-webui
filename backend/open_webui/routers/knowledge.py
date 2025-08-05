@@ -650,12 +650,65 @@ async def delete_knowledge_by_id(id: str, user=Depends(get_verified_user)):
                 )
                 Models.update_model_by_id(model.id, model_form)
 
+    # Get all file IDs from the knowledge base
+    file_ids = []
+    if knowledge.data and knowledge.data.get("file_ids"):
+        file_ids = knowledge.data.get("file_ids", [])
+    
+    log.info(f"Found {len(file_ids)} files in knowledge base {id}")
+
     # Clean up vector DB
     try:
         VECTOR_DB_CLIENT.delete_collection(collection_name=id)
     except Exception as e:
         log.debug(e)
         pass
+
+    # Check which files are used by other knowledge bases and delete orphaned files
+    if file_ids:
+        # Get all knowledge bases to check file usage
+        all_knowledge_bases = Knowledges.get_knowledge_bases()
+        
+        # Collect all file IDs used by other knowledge bases
+        files_used_by_others = set()
+        for kb in all_knowledge_bases:
+            if kb.id != id and kb.data and kb.data.get("file_ids"):
+                files_used_by_others.update(kb.data.get("file_ids", []))
+        
+        # Find orphaned files (files only used by this knowledge base)
+        orphaned_file_ids = [file_id for file_id in file_ids if file_id not in files_used_by_others]
+        
+        log.info(f"Found {len(orphaned_file_ids)} orphaned files to delete")
+        
+        # Delete orphaned files from storage and database
+        for file_id in orphaned_file_ids:
+            try:
+                file = Files.get_file_by_id(file_id)
+                if file:
+                    # Delete from storage
+                    try:
+                        Storage.delete_file_and_related(file.path)
+                        log.info(f"Deleted orphaned file from storage: {file.filename}")
+                    except Exception as e:
+                        log.warning(f"Failed to delete orphaned file from storage {file.filename}: {e}")
+                    
+                    # Delete from vector database
+                    try:
+                        file_collection = f"file-{file_id}"
+                        if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+                            VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+                            log.info(f"Deleted orphaned file collection from vector DB: {file_collection}")
+                    except Exception as e:
+                        log.debug(f"Failed to delete orphaned file collection {file_collection}: {e}")
+                    
+                    # Delete from database
+                    Files.delete_file_by_id(file_id)
+                    log.info(f"Deleted orphaned file from database: {file.filename}")
+                else:
+                    log.warning(f"Orphaned file {file_id} not found in database")
+            except Exception as e:
+                log.error(f"Error deleting orphaned file {file_id}: {e}")
+
     result = Knowledges.delete_knowledge_by_id(id=id)
     return result
 
@@ -1186,6 +1239,9 @@ async def process_transcription_completion(
         if not transcription_text:
             raise ValueError("Transcription resulted in empty content")
         
+        # Get timestamp segments if available
+        segments = result.get("segments", [])
+        
         # Process the file with transcribed content
         # Create a mock user object for the background task
         class MockUser:
@@ -1193,11 +1249,45 @@ async def process_transcription_completion(
                 self.id = user_id
         
         mock_user = MockUser(user_id)
-        process_file(
-            request,
-            ProcessFileForm(file_id=file_id, content=transcription_text, collection_name=knowledge_id),
-            user=mock_user,
+        
+        # Create document with timestamp information
+        from langchain_core.documents import Document
+        from open_webui.routers.retrieval import save_docs_to_vector_db
+        
+        doc = Document(
+            page_content=transcription_text,
+            metadata={
+                "name": filename,
+                "file_id": file_id,
+                "source": filename,
+                "segments": segments,  # Include timestamp segments
+                "content_type": mime_type,
+                "transcription_source": "audio_video"
+            }
         )
+        
+        # Save document to vector database with timestamp information
+        save_docs_to_vector_db(
+            request=request,
+            docs=[doc],
+            collection_name=knowledge_id,
+            metadata={
+                "file_id": file_id,
+                "name": filename,
+                "content_type": mime_type,
+                "transcription_source": "audio_video"
+            },
+            user=mock_user
+        )
+        
+        # Update the file's content field with the transcribed text
+        from open_webui.models.files import Files
+        file = Files.get_file_by_id(file_id)
+        if file:
+            data = file.data or {}
+            data["content"] = transcription_text
+            Files.update_file_data_by_id(file_id, data)
+            log.info(f"Updated file content for {file_id}")
         
         log.info(f"Processing completed for file {file_id}")
         
@@ -1385,6 +1475,8 @@ async def add_google_drive_folder_to_knowledge(
     try:
         # Import progress tracking functions
         from open_webui.socket.main import emit_session_start, emit_progress_update, emit_session_complete
+        # Ensure Files model is available
+        from open_webui.models.files import Files
         
         # List all files in the folder
         files = google_drive_service.list_folder_files(
@@ -1548,11 +1640,48 @@ async def add_google_drive_folder_to_knowledge(
                             if not transcription_text:
                                 raise ValueError("Transcription resulted in empty content")
                             
-                            process_file(
-                                request,
-                                ProcessFileForm(file_id=storage_file_id, content=transcription_text, collection_name=id),
-                                user=user,
+                            # Get timestamp segments if available
+                            segments = result.get("segments", [])
+                            
+                            # Create document with timestamp information
+                            from langchain_core.documents import Document
+                            from open_webui.routers.retrieval import save_docs_to_vector_db
+                            
+                            doc = Document(
+                                page_content=transcription_text,
+                                metadata={
+                                    "name": filename,
+                                    "file_id": storage_file_id,
+                                    "source": filename,
+                                    "segments": segments,  # Include timestamp segments
+                                    "content_type": mime_type,
+                                    "transcription_source": "google_drive"
+                                }
                             )
+                            
+                            # Save document to vector database with timestamp information
+                            save_docs_to_vector_db(
+                                request=request,
+                                docs=[doc],
+                                collection_name=id,
+                                metadata={
+                                    "file_id": storage_file_id,
+                                    "name": filename,
+                                    "content_type": mime_type,
+                                    "transcription_source": "google_drive"
+                                },
+                                user=user
+                            )
+                            
+                            # Update the file's content field with the transcribed text
+                            from open_webui.models.files import Files
+                            file = Files.get_file_by_id(storage_file_id)
+                            if file:
+                                data = file.data or {}
+                                data["content"] = transcription_text
+                                Files.update_file_data_by_id(storage_file_id, data)
+                                log.info(f"Updated file content for {storage_file_id}")
+                            
                             log.info(f"Processing completed for file {storage_file_id}")
                         except Exception as process_error:
                             log.error(f"Error processing file {storage_file_id} with transcription: {str(process_error)}")

@@ -16,6 +16,7 @@ export interface ProcessingSession {
 	files: FileProgress[];
 	startTime: number;
 	estimatedTimeRemaining?: number;
+	currentProcessingFileIndex?: number; // Track which file is currently being processed
 }
 
 interface ProgressState {
@@ -46,13 +47,15 @@ function createProgressStore() {
 						status: 'pending' as const,
 						progress: 0
 					})),
-					startTime: Date.now()
+					startTime: Date.now(),
+					currentProcessingFileIndex: 0
 				};
 				
 				const newSessions = new Map(state.sessions);
 				newSessions.set(sessionId, session);
 				
 				console.log('Progress store: Session created', session);
+				console.log('Progress store: Session files:', session.files.map(f => ({ id: f.id, filename: f.filename, status: f.status })));
 				console.log('Progress store: Total sessions after creation:', newSessions.size);
 				
 				return {
@@ -66,6 +69,7 @@ function createProgressStore() {
 		updateFileProgress: (sessionId: string, fileId: string, updates: Partial<FileProgress>) => {
 			console.log('Progress store: Updating file progress', { sessionId, fileId, updates });
 			update(state => {
+				console.log('Progress store: Current state sessions:', Array.from(state.sessions.keys()));
 				const session = state.sessions.get(sessionId);
 				if (!session) {
 					console.warn('Progress store: Session not found', sessionId);
@@ -73,10 +77,15 @@ function createProgressStore() {
 				}
 
 				let updatedFiles;
+				let fileMatched = false;
+				let matchedFileIndex = -1;
 				
 				// For single file processing, update the first file regardless of fileId
 				if (session.files.length === 1) {
 					updatedFiles = session.files.map(file => ({ ...file, ...updates }));
+					fileMatched = true;
+					matchedFileIndex = 0;
+					console.log('Progress store: Single file processing - updated first file');
 				} else {
 					// For batch processing, try to match by file ID first
 					const fileIndex = session.files.findIndex(file => file.id === fileId);
@@ -86,47 +95,101 @@ function createProgressStore() {
 						updatedFiles = session.files.map((file, index) => 
 							index === fileIndex ? { ...file, ...updates } : file
 						);
+						fileMatched = true;
+						matchedFileIndex = fileIndex;
+						console.log('Progress store: File matched by ID at index', fileIndex);
 					} else {
 						// ID not found, try to match by filename from the message
 						// This handles the case where backend sends different IDs than frontend expects
 						const message = updates.message || '';
-						const filename = message.match(/Downloading (.+)$/)?.[1] || 
-										message.match(/Uploading (.+)$/)?.[1] || 
-										message.match(/Creating file record for (.+)$/)?.[1] || 
-										message.match(/Transcribing (.+)$/)?.[1] || 
-										message.match(/Processing audio chunks for (.+)$/)?.[1] ||
-										message.match(/Processing (.+)$/)?.[1] ||
-										message.match(/Completed (.+)$/)?.[1] ||
-										message.match(/Transcription completed for (.+)$/)?.[1];
+						const filename = extractFilenameFromMessage(message);
 						
 						if (filename) {
+							console.log('Progress store: Extracted filename from message:', filename);
+							console.log('Progress store: Available filenames in session:', session.files.map(f => f.filename));
+							
 							const fileIndex = session.files.findIndex(file => file.filename === filename);
 							if (fileIndex !== -1) {
 								updatedFiles = session.files.map((file, index) => 
 									index === fileIndex ? { ...file, ...updates } : file
 								);
+								fileMatched = true;
+								matchedFileIndex = fileIndex;
+								console.log('Progress store: File matched by filename at index', fileIndex, 'filename:', filename);
 							} else {
-								// Still not found, update the first file as fallback
-								console.warn('Progress store: Could not match file by ID or filename, updating first file as fallback');
-								updatedFiles = session.files.map((file, index) => 
-									index === 0 ? { ...file, ...updates } : file
+								console.warn('Progress store: Filename not found in session files:', filename);
+								console.log('Progress store: Available filenames:', session.files.map(f => f.filename));
+								console.log('Progress store: Exact match failed, checking for partial matches...');
+								
+								// Try partial matching as fallback
+								const partialMatchIndex = session.files.findIndex(file => 
+									filename.includes(file.filename) || file.filename.includes(filename)
 								);
+								if (partialMatchIndex !== -1) {
+									updatedFiles = session.files.map((file, index) => 
+										index === partialMatchIndex ? { ...file, ...updates } : file
+									);
+									fileMatched = true;
+									matchedFileIndex = partialMatchIndex;
+									console.log('Progress store: File matched by partial filename at index', partialMatchIndex, 'filename:', session.files[partialMatchIndex].filename);
+								}
 							}
 						} else {
-							// No filename found in message, update the first file as fallback
-							console.warn('Progress store: Could not extract filename from message, updating first file as fallback');
-							updatedFiles = session.files.map((file, index) => 
-								index === 0 ? { ...file, ...updates } : file
+							console.warn('Progress store: Could not extract filename from message:', message);
+						}
+						
+						// If still not matched, try to update the next pending file
+						if (!fileMatched) {
+							console.log('Progress store: Attempting fallback matching strategies...');
+							console.log('Progress store: Current session files:', session.files.map(f => ({ filename: f.filename, status: f.status, progress: f.progress })));
+							
+							// First, try to find a file that's currently processing
+							const processingIndex = session.files.findIndex(file => 
+								file.status === 'processing' || file.status === 'transcribing'
 							);
+							if (processingIndex !== -1) {
+								updatedFiles = session.files.map((file, index) => 
+									index === processingIndex ? { ...file, ...updates } : file
+								);
+								fileMatched = true;
+								matchedFileIndex = processingIndex;
+								console.log('Progress store: Updated currently processing file at index', processingIndex, 'filename:', session.files[processingIndex].filename);
+							} else {
+								// Try to find the next pending file
+								const nextPendingIndex = session.files.findIndex(file => file.status === 'pending');
+								if (nextPendingIndex !== -1) {
+									updatedFiles = session.files.map((file, index) => 
+										index === nextPendingIndex ? { ...file, ...updates } : file
+									);
+									fileMatched = true;
+									matchedFileIndex = nextPendingIndex;
+									console.log('Progress store: Updated next pending file at index', nextPendingIndex, 'filename:', session.files[nextPendingIndex].filename);
+								} else {
+									// Last resort: update the first file as fallback
+									console.warn('Progress store: No pending or processing files found, updating first file as fallback');
+									updatedFiles = session.files.map((file, index) => 
+										index === 0 ? { ...file, ...updates } : file
+									);
+									fileMatched = true;
+									matchedFileIndex = 0;
+								}
+							}
 						}
 					}
+				}
+
+				// Ensure updatedFiles is defined before using it
+				if (!updatedFiles) {
+					console.warn('Progress store: No file was matched, using original files');
+					updatedFiles = session.files;
 				}
 
 				const processedFiles = updatedFiles.filter(f => f.status === 'completed').length;
 				const newSession = {
 					...session,
 					files: updatedFiles,
-					processedFiles
+					processedFiles,
+					currentProcessingFileIndex: matchedFileIndex !== -1 ? matchedFileIndex : session.currentProcessingFileIndex
 				};
 
 				const newSessions = new Map(state.sessions);
@@ -207,6 +270,35 @@ function createProgressStore() {
 			});
 		}
 	};
+}
+
+// Helper function to extract filename from progress message
+function extractFilenameFromMessage(message: string): string | null {
+	const patterns = [
+		/Downloading (.+)$/,
+		/Uploading (.+)$/,
+		/Creating file record for (.+)$/,
+		/Transcribing (.+)$/,
+		/Processing audio chunks for (.+)$/,
+		/Processing (.+)$/,
+		/Completed (.+)$/,
+		/Transcription completed for (.+)$/,
+		/Transcribing (.+?)\.\.\./,
+		/Processing (.+?)\.\.\./
+	];
+	
+	for (const pattern of patterns) {
+		const match = message.match(pattern);
+		if (match && match[1]) {
+			// Clean up the filename by removing any trailing text after the filename
+			let filename = match[1];
+			// Remove any text after the file extension (like "... (6s elapsed)")
+			filename = filename.replace(/\s*\.\.\.\s*\(.*\)$/, '');
+			return filename;
+		}
+	}
+	
+	return null;
 }
 
 export const progressStore = createProgressStore(); 

@@ -568,8 +568,23 @@ def transcription_handler(request, file_path, metadata):
             % (info.language, info.language_probability)
         )
 
-        transcript = "".join([segment.text for segment in list(segments)])
-        data = {"text": transcript.strip()}
+        # Preserve timestamp information from segments
+        segments_with_timestamps = [
+            {
+                "text": segment.text,
+                "start": segment.start,
+                "end": segment.end,
+                "avg_logprob": getattr(segment, 'avg_logprob', None),
+                "no_speech_prob": getattr(segment, 'no_speech_prob', None)
+            }
+            for segment in list(segments)
+        ]
+        
+        transcript = "".join([segment["text"] for segment in segments_with_timestamps])
+        data = {
+            "text": transcript.strip(),
+            "segments": segments_with_timestamps
+        }
 
         # save the transcript to a json file
         transcript_file = f"{file_dir}/{id}.json"
@@ -589,6 +604,7 @@ def transcription_handler(request, file_path, metadata):
                 files={"file": (filename, open(file_path, "rb"))},
                 data={
                     "model": request.app.state.config.STT_MODEL,
+                    "response_format": "verbose_json",  # Request timestamp information
                     **(
                         {"language": metadata.get("language")}
                         if metadata.get("language")
@@ -599,6 +615,27 @@ def transcription_handler(request, file_path, metadata):
 
             r.raise_for_status()
             data = r.json()
+
+            # Extract segments with timestamps if available
+            segments_with_timestamps = []
+            if "segments" in data:
+                segments_with_timestamps = [
+                    {
+                        "text": segment.get("text", ""),
+                        "start": segment.get("start", 0),
+                        "end": segment.get("end", 0),
+                        "avg_logprob": segment.get("avg_logprob", None),
+                        "no_speech_prob": segment.get("no_speech_prob", None)
+                    }
+                    for segment in data.get("segments", [])
+                ]
+            
+            # Ensure we have the text field for backward compatibility
+            if "text" not in data:
+                data["text"] = " ".join([segment["text"] for segment in segments_with_timestamps])
+            
+            # Add segments to the response
+            data["segments"] = segments_with_timestamps
 
             # save the transcript to a json file
             transcript_file = f"{file_dir}/{id}.json"
@@ -652,17 +689,57 @@ def transcription_handler(request, file_path, metadata):
             r.raise_for_status()
             response_data = r.json()
 
-            # Extract transcript from Deepgram response
+            # Extract transcript and segments from Deepgram response
             try:
-                transcript = response_data["results"]["channels"][0]["alternatives"][
-                    0
-                ].get("transcript", "")
+                alternative = response_data["results"]["channels"][0]["alternatives"][0]
+                transcript = alternative.get("transcript", "")
+                
+                # Extract segments with timestamps if available
+                segments_with_timestamps = []
+                if "words" in alternative:
+                    # Group words into segments based on timing
+                    current_segment = {"text": "", "start": None, "end": None, "words": []}
+                    
+                    for word in alternative["words"]:
+                        word_text = word.get("word", "")
+                        word_start = word.get("start", 0)
+                        word_end = word.get("end", 0)
+                        
+                        # Start new segment if there's a significant gap (>1 second) or first word
+                        if (current_segment["start"] is None or 
+                            word_start - current_segment["end"] > 1.0):
+                            
+                            # Save previous segment if it has content
+                            if current_segment["text"].strip():
+                                segments_with_timestamps.append(current_segment)
+                            
+                            # Start new segment
+                            current_segment = {
+                                "text": word_text,
+                                "start": word_start,
+                                "end": word_end,
+                                "words": [word]
+                            }
+                        else:
+                            # Add to current segment
+                            current_segment["text"] += " " + word_text
+                            current_segment["end"] = word_end
+                            current_segment["words"].append(word)
+                    
+                    # Add the last segment if it has content
+                    if current_segment["text"].strip():
+                        segments_with_timestamps.append(current_segment)
+                
             except (KeyError, IndexError) as e:
                 log.error(f"Malformed response from Deepgram: {str(e)}")
                 raise Exception(
                     "Failed to parse Deepgram response - unexpected response format"
                 )
-            data = {"text": transcript.strip()}
+            
+            data = {
+                "text": transcript.strip(),
+                "segments": segments_with_timestamps
+            }
 
             # Save transcript
             transcript_file = f"{file_dir}/{id}.json"
@@ -768,7 +845,23 @@ def transcription_handler(request, file_path, metadata):
             if not transcript:
                 raise ValueError("Empty transcript in response")
 
-            data = {"text": transcript}
+            # Extract segments with timestamps if available
+            segments_with_timestamps = []
+            if "phrases" in response:
+                for phrase in response["phrases"]:
+                    phrase_text = phrase.get("text", "").strip()
+                    if phrase_text:
+                        segments_with_timestamps.append({
+                            "text": phrase_text,
+                            "start": phrase.get("start", 0),
+                            "end": phrase.get("end", 0),
+                            "speaker": phrase.get("speaker", None)
+                        })
+
+            data = {
+                "text": transcript,
+                "segments": segments_with_timestamps
+            }
 
             # Save transcript to json file (consistent with other providers)
             transcript_file = f"{file_dir}/{id}.json"
@@ -852,6 +945,11 @@ def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None
 
     return {
         "text": " ".join([result["text"] for result in results]),
+        "segments": [
+            segment for result in results 
+            if "segments" in result 
+            for segment in result["segments"]
+        ]
     }
 
 

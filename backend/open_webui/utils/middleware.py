@@ -974,9 +974,19 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     if source_id not in citation_idx_map:
                         citation_idx_map[source_id] = len(citation_idx_map) + 1
 
+                    # Include timestamp information in citation if available
+                    timestamp_info = ""
+                    if (request.app.state.config.ENABLE_TIMESTAMP_CITATIONS and 
+                        document_metadata.get("timestamp_start") is not None and 
+                        document_metadata.get("timestamp_end") is not None):
+                        start_time = document_metadata.get("timestamp_start", 0)
+                        end_time = document_metadata.get("timestamp_end", 0)
+                        timestamp_info = f' timestamp_start="{start_time}" timestamp_end="{end_time}"'
+
                     context_string += (
                         f'<source id="{citation_idx_map[source_id]}"'
                         + (f' name="{source_name}"' if source_name else "")
+                        + timestamp_info
                         + f">{document_text}</source>\n"
                     )
 
