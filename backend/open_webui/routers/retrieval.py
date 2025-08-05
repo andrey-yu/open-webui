@@ -516,6 +516,10 @@ def save_docs_to_vector_db(
     add: bool = False,
     user=None,
 ) -> bool:
+    log.info(f"=== SAVE_DOCS_TO_VECTOR_DB START === Collection: {collection_name}, Overwrite: {overwrite}, Add: {add}")
+    log.info(f"Metadata: {metadata}")
+    log.info(f"Number of docs: {len(docs) if docs else 0}")
+    
     def _get_docs_info(docs: list[Document]) -> str:
         docs_info = set()
 
@@ -538,6 +542,7 @@ def save_docs_to_vector_db(
 
     # Check if entries with the same hash (metadata.hash) already exist
     if metadata and "hash" in metadata:
+        log.info(f"Checking for existing document with hash: {metadata['hash']}")
         result = VECTOR_DB_CLIENT.query(
             collection_name=collection_name,
             filter={"hash": metadata["hash"]},
@@ -548,6 +553,8 @@ def save_docs_to_vector_db(
             if existing_doc_ids:
                 log.info(f"Document with hash {metadata['hash']} already exists")
                 raise ValueError(ERROR_MESSAGES.DUPLICATE_CONTENT)
+            else:
+                log.info(f"No existing document found with hash {metadata['hash']}")
 
     if split:
         # Check if any document has timestamp segments (from audio/video transcription)
@@ -585,54 +592,21 @@ def save_docs_to_vector_db(
                 add_start_index=True,
             )
             docs = text_splitter.split_documents(docs)
-        elif request.app.state.config.TEXT_SPLITTER == "markdown_header":
-            log.info("Using markdown header text splitter")
-
-            # Define headers to split on - covering most common markdown header levels
-            headers_to_split_on = [
-                ("#", "Header 1"),
-                ("##", "Header 2"),
-                ("###", "Header 3"),
-                ("####", "Header 4"),
-                ("#####", "Header 5"),
-                ("######", "Header 6"),
-            ]
-
-            markdown_splitter = MarkdownHeaderTextSplitter(
-                headers_to_split_on=headers_to_split_on,
-                strip_headers=False,  # Keep headers in content for context
+        elif request.app.state.config.TEXT_SPLITTER == "markdown":
+            log.info("Using markdown text splitter")
+            text_splitter = MarkdownHeaderTextSplitter(
+                headers_to_split_on=request.app.state.config.MARKDOWN_HEADERS_TO_SPLIT_ON,
+                return_each_line=False,
             )
-
             md_split_docs = []
             for doc in docs:
-                md_header_splits = markdown_splitter.split_text(doc.page_content)
-                text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=request.app.state.config.CHUNK_SIZE,
-                    chunk_overlap=request.app.state.config.CHUNK_OVERLAP,
-                    add_start_index=True,
-                )
-                md_header_splits = text_splitter.split_documents(md_header_splits)
-
-                # Convert back to Document objects, preserving original metadata
-                for split_chunk in md_header_splits:
-                    headings_list = []
-                    # Extract header values in order based on headers_to_split_on
-                    for _, header_meta_key_name in headers_to_split_on:
-                        if header_meta_key_name in split_chunk.metadata:
-                            headings_list.append(
-                                split_chunk.metadata[header_meta_key_name]
-                            )
-
-                    md_split_docs.append(
-                        Document(
-                            page_content=split_chunk.page_content,
-                            metadata={**doc.metadata, "headings": headings_list},
-                        )
-                    )
+                md_split_docs.extend(text_splitter.split_text(doc.page_content))
 
             docs = md_split_docs
         else:
             raise ValueError(ERROR_MESSAGES.DEFAULT("Invalid text splitter"))
+
+    log.info(f"After splitting, number of docs: {len(docs) if docs else 0}")
 
     if len(docs) == 0:
         log.error(f"Empty documents list provided to save_docs_to_vector_db for collection {collection_name}")
@@ -670,19 +644,23 @@ def save_docs_to_vector_db(
                 metadata[key] = str(value)
 
     try:
+        log.info(f"Checking if collection exists: {collection_name}")
         if VECTOR_DB_CLIENT.has_collection(collection_name=collection_name):
-            log.info(f"collection {collection_name} already exists")
+            log.info(f"Collection {collection_name} already exists")
 
             if overwrite:
+                log.info(f"Overwrite=True, deleting existing collection {collection_name}")
                 VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
-                log.info(f"deleting existing collection {collection_name}")
+                log.info(f"Successfully deleted existing collection {collection_name}")
             elif add is False:
                 log.info(
-                    f"collection {collection_name} already exists, overwrite is False and add is False"
+                    f"Collection {collection_name} already exists, overwrite is False and add is False - RETURNING EARLY"
                 )
                 return True
+            else:
+                log.info(f"Collection {collection_name} exists, add is True - will add to existing collection")
 
-        log.info(f"adding to collection {collection_name}")
+        log.info(f"Adding to collection {collection_name}")
         embedding_function = get_embedding_function(
             request.app.state.config.RAG_EMBEDDING_ENGINE,
             request.app.state.config.RAG_EMBEDDING_MODEL,
@@ -713,11 +691,13 @@ def save_docs_to_vector_db(
             ),
         )
 
+        log.info(f"Generating embeddings for {len(texts)} texts")
         embeddings = embedding_function(
             list(map(lambda x: x.replace("\n", " "), texts)),
             prefix=RAG_EMBEDDING_CONTENT_PREFIX,
             user=user,
         )
+        log.info(f"Generated {len(embeddings)} embeddings")
 
         items = [
             {
@@ -729,14 +709,17 @@ def save_docs_to_vector_db(
             for idx, text in enumerate(texts)
         ]
 
+        log.info(f"Inserting {len(items)} items into collection {collection_name}")
         VECTOR_DB_CLIENT.insert(
             collection_name=collection_name,
             items=items,
         )
+        log.info(f"Successfully inserted {len(items)} items into collection {collection_name}")
 
+        log.info(f"=== SAVE_DOCS_TO_VECTOR_DB COMPLETE === Collection: {collection_name}")
         return True
     except Exception as e:
-        log.exception(e)
+        log.exception(f"Error in save_docs_to_vector_db for collection {collection_name}: {str(e)}")
         raise e
 
 
@@ -752,23 +735,32 @@ def process_file(
     form_data: ProcessFileForm,
     user=Depends(get_verified_user),
 ):
+    log.info(f"=== PROCESS_FILE START === File ID: {form_data.file_id}, Collection Name: {form_data.collection_name}")
+    
     try:
         file = Files.get_file_by_id(form_data.file_id)
+        log.info(f"File found: {file.filename} (ID: {file.id})")
 
         collection_name = form_data.collection_name
 
         if collection_name is None:
             collection_name = f"file-{file.id}"
+            log.info(f"No collection name provided, using default: {collection_name}")
+        else:
+            log.info(f"Using provided collection name: {collection_name}")
 
         if form_data.content:
+            log.info("Processing with provided content (content update mode)")
             # Update the content in the file
             # Usage: /files/{file_id}/data/content/update, /files/ (audio file upload pipeline)
 
             try:
                 # /files/{file_id}/data/content/update
+                log.info(f"Deleting file collection: file-{file.id}")
                 VECTOR_DB_CLIENT.delete_collection(collection_name=f"file-{file.id}")
             except:
                 # Audio file upload pipeline
+                log.info("Audio file upload pipeline - skipping file collection deletion")
                 pass
 
             docs = [
@@ -785,15 +777,19 @@ def process_file(
             ]
 
             text_content = form_data.content
+            log.info(f"Created {len(docs)} documents from provided content")
         elif form_data.collection_name:
+            log.info("Processing with collection name (knowledge base mode)")
             # Check if the file has already been processed and save the content
             # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
 
+            log.info(f"Querying existing vector DB entries for file {file.id}")
             result = VECTOR_DB_CLIENT.query(
                 collection_name=f"file-{file.id}", filter={"file_id": file.id}
             )
 
             if result is not None and len(result.ids[0]) > 0:
+                log.info(f"Found {len(result.ids[0])} existing vector DB entries for file {file.id}")
                 docs = [
                     Document(
                         page_content=result.documents[0][idx],
@@ -802,6 +798,7 @@ def process_file(
                     for idx, id in enumerate(result.ids[0])
                 ]
             else:
+                log.info(f"No existing vector DB entries found for file {file.id}, using file data")
                 docs = [
                     Document(
                         page_content=file.data.get("content", ""),
@@ -816,12 +813,15 @@ def process_file(
                 ]
 
             text_content = file.data.get("content", "")
+            log.info(f"Created {len(docs)} documents from file data, content length: {len(text_content)}")
         else:
+            log.info("Processing file from scratch (file upload mode)")
             # Process the file and save the content
             # Usage: /files/
             file_path = file.path
             if file_path:
                 file_path = Storage.get_file(file_path)
+                log.info(f"Processing file: {file.filename} at path: {file_path}")
                 
                 # Log the processing configuration
                 content_extraction_engine = request.app.state.config.CONTENT_EXTRACTION_ENGINE
@@ -878,6 +878,7 @@ def process_file(
                     for doc in docs
                 ]
             else:
+                log.info("No file path available, using file data")
                 docs = [
                     Document(
                         page_content=file.data.get("content", ""),
@@ -944,16 +945,23 @@ def process_file(
             else:
                 raise ValueError("No content could be extracted from the file. This may be because the file is empty, corrupted, password-protected, or uses an unsupported format.")
         
+        log.info(f"Updating file data with content length: {len(text_content)}")
         Files.update_file_data_by_id(
             file.id,
             {"content": text_content},
         )
 
         hash = calculate_sha256_string(text_content)
+        log.info(f"Calculated hash: {hash}")
         Files.update_file_hash_by_id(file.id, hash)
 
         if not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
+            log.info("BYPASS_EMBEDDING_AND_RETRIEVAL is False, proceeding with vector DB operations")
             try:
+                # Determine the add parameter
+                add_param = True if form_data.collection_name else False
+                log.info(f"Calling save_docs_to_vector_db with add={add_param}, collection_name={collection_name}")
+                
                 result = save_docs_to_vector_db(
                     request,
                     docs=docs,
@@ -963,11 +971,12 @@ def process_file(
                         "name": file.filename,
                         "hash": hash,
                     },
-                    add=(True if form_data.collection_name else False),
+                    add=add_param,
                     user=user,
                 )
 
                 if result:
+                    log.info(f"Successfully saved docs to vector DB, updating file metadata with collection_name: {collection_name}")
                     Files.update_file_metadata_by_id(
                         file.id,
                         {
@@ -975,6 +984,7 @@ def process_file(
                         },
                     )
 
+                    log.info(f"=== PROCESS_FILE COMPLETE === File ID: {form_data.file_id}, Collection: {collection_name}")
                     return {
                         "status": True,
                         "collection_name": collection_name,
@@ -982,8 +992,10 @@ def process_file(
                         "content": text_content,
                     }
             except Exception as e:
+                log.error(f"Error in save_docs_to_vector_db: {str(e)}")
                 raise e
         else:
+            log.info("BYPASS_EMBEDDING_AND_RETRIEVAL is True, skipping vector DB operations")
             return {
                 "status": True,
                 "collection_name": None,
@@ -992,7 +1004,7 @@ def process_file(
             }
 
     except Exception as e:
-        log.exception(e)
+        log.exception(f"Error in process_file for file {form_data.file_id}: {str(e)}")
         if "No pandoc was found" in str(e):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

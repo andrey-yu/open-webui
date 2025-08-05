@@ -355,19 +355,25 @@ def add_file_to_knowledge_by_id(
     form_data: KnowledgeFileIdForm,
     user=Depends(get_verified_user),
 ):
+    log.info(f"=== FILE ADDITION START === Knowledge ID: {id}, File ID: {form_data.file_id}")
+    
     knowledge = Knowledges.get_knowledge_by_id(id=id)
 
     if not knowledge:
+        log.error(f"Knowledge base not found: {id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    log.info(f"Knowledge base found: {knowledge.name} (user_id: {knowledge.user_id})")
 
     if (
         knowledge.user_id != user.id
         and not has_access(user.id, "write", knowledge.access_control)
         and user.role != "admin"
     ):
+        log.error(f"Access denied for user {user.id} to knowledge base {id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -375,24 +381,34 @@ def add_file_to_knowledge_by_id(
 
     file = Files.get_file_by_id(form_data.file_id)
     if not file:
+        log.error(f"File not found: {form_data.file_id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    log.info(f"File found: {file.filename} (path: {file.path})")
+    
     if not file.data:
+        log.error(f"File {form_data.file_id} has no data (not processed)")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.FILE_NOT_PROCESSED,
         )
 
+    log.info(f"File data exists, content length: {len(file.data.get('content', ''))}")
+
     # Add content to the vector database
+    log.info(f"Calling process_file with collection_name={id}")
     try:
         process_file(
             request,
             ProcessFileForm(file_id=form_data.file_id, collection_name=id),
             user=user,
         )
+        log.info(f"Successfully processed file {form_data.file_id} for collection {id}")
     except Exception as e:
+        log.error(f"Error processing file {form_data.file_id}: {str(e)}")
         log.debug(e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -402,31 +418,39 @@ def add_file_to_knowledge_by_id(
     if knowledge:
         data = knowledge.data or {}
         file_ids = data.get("file_ids", [])
+        log.info(f"Current file_ids in knowledge base: {file_ids}")
 
         if form_data.file_id not in file_ids:
             file_ids.append(form_data.file_id)
             data["file_ids"] = file_ids
+            log.info(f"Updated file_ids after addition: {file_ids}")
 
             knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
+            log.info(f"Successfully updated knowledge base data")
 
             if knowledge:
                 files = Files.get_file_metadatas_by_ids(file_ids)
+                log.info(f"Retrieved {len(files)} files for knowledge base")
 
+                log.info(f"=== FILE ADDITION COMPLETE === Knowledge ID: {id}, File ID: {form_data.file_id}")
                 return KnowledgeFilesResponse(
                     **knowledge.model_dump(),
                     files=files,
                 )
             else:
+                log.error(f"Failed to update knowledge base: {id}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=ERROR_MESSAGES.DEFAULT("knowledge"),
                 )
         else:
+            log.warning(f"File ID {form_data.file_id} already exists in knowledge base file_ids: {file_ids}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT("file_id"),
             )
     else:
+        log.error(f"Knowledge base not found after update: {id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
@@ -511,18 +535,24 @@ def remove_file_from_knowledge_by_id(
     form_data: KnowledgeFileIdForm,
     user=Depends(get_verified_user),
 ):
+    log.info(f"=== FILE REMOVAL START === Knowledge ID: {id}, File ID: {form_data.file_id}")
+    
     knowledge = Knowledges.get_knowledge_by_id(id=id)
     if not knowledge:
+        log.error(f"Knowledge base not found: {id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    log.info(f"Knowledge base found: {knowledge.name} (user_id: {knowledge.user_id})")
 
     if (
         knowledge.user_id != user.id
         and not has_access(user.id, "write", knowledge.access_control)
         and user.role != "admin"
     ):
+        log.error(f"Access denied for user {user.id} to knowledge base {id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -530,16 +560,21 @@ def remove_file_from_knowledge_by_id(
 
     file = Files.get_file_by_id(form_data.file_id)
     if not file:
+        log.error(f"File not found: {form_data.file_id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    log.info(f"File found: {file.filename} (path: {file.path})")
+
     # Remove content from the vector database
+    log.info(f"Attempting to delete vector DB entries for file {form_data.file_id} from collection {knowledge.id}")
     try:
         VECTOR_DB_CLIENT.delete(
             collection_name=knowledge.id, filter={"file_id": form_data.file_id}
         )
+        log.info(f"Successfully deleted vector DB entries for file {form_data.file_id} from collection {knowledge.id}")
     except Exception as e:
         log.debug("This was most likely caused by bypassing embedding processing")
         log.debug(e)
@@ -548,49 +583,66 @@ def remove_file_from_knowledge_by_id(
     try:
         # Remove the file's collection from vector database
         file_collection = f"file-{form_data.file_id}"
+        log.info(f"Checking if file collection exists: {file_collection}")
         if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+            log.info(f"Deleting file collection: {file_collection}")
             VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+            log.info(f"Successfully deleted file collection: {file_collection}")
+        else:
+            log.info(f"File collection does not exist: {file_collection}")
     except Exception as e:
         log.debug("This was most likely caused by bypassing embedding processing")
         log.debug(e)
         pass
 
     # Delete file from storage and database
+    log.info(f"Deleting file from storage: {file.path}")
     try:
         Storage.delete_file_and_related(file.path)
+        log.info(f"Successfully deleted file from storage: {file.path}")
     except Exception as e:
         log.warning(f"Failed to delete file and related files from storage: {e}")
     
+    log.info(f"Deleting file record from database: {form_data.file_id}")
     Files.delete_file_by_id(form_data.file_id)
+    log.info(f"Successfully deleted file record from database: {form_data.file_id}")
 
     if knowledge:
         data = knowledge.data or {}
         file_ids = data.get("file_ids", [])
+        log.info(f"Current file_ids in knowledge base: {file_ids}")
 
         if form_data.file_id in file_ids:
             file_ids.remove(form_data.file_id)
             data["file_ids"] = file_ids
+            log.info(f"Updated file_ids after removal: {file_ids}")
 
             knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
+            log.info(f"Successfully updated knowledge base data")
 
             if knowledge:
                 files = Files.get_file_metadatas_by_ids(file_ids)
+                log.info(f"Retrieved {len(files)} remaining files for knowledge base")
 
+                log.info(f"=== FILE REMOVAL COMPLETE === Knowledge ID: {id}, File ID: {form_data.file_id}")
                 return KnowledgeFilesResponse(
                     **knowledge.model_dump(),
                     files=files,
                 )
             else:
+                log.error(f"Failed to update knowledge base: {id}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=ERROR_MESSAGES.DEFAULT("knowledge"),
                 )
         else:
+            log.error(f"File ID {form_data.file_id} not found in knowledge base file_ids: {file_ids}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT("file_id"),
             )
     else:
+        log.error(f"Knowledge base not found after update: {id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
@@ -1295,6 +1347,7 @@ async def process_transcription_completion(
                 "content_type": mime_type,
                 "transcription_source": "audio_video"
             },
+            add=True,
             user=mock_user
         )
         
@@ -1697,6 +1750,7 @@ async def add_google_drive_folder_to_knowledge(
                                     "content_type": mime_type,
                                     "transcription_source": "google_drive"
                                 },
+                                add=True,
                                 user=user
                             )
                             

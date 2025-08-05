@@ -190,7 +190,15 @@ def query_doc(
         )
 
         if result:
-            log.info(f"query_doc:result {result.ids} {result.metadatas}")
+            # Log only essential info: number of results and file names
+            num_results = len(result.ids[0]) if result.ids and result.ids[0] else 0
+            file_names = []
+            if result.metadatas and result.metadatas[0]:
+                for metadata in result.metadatas[0]:
+                    file_name = metadata.get('name', 'unknown')
+                    file_names.append(file_name)
+            
+            log.info(f"query_doc: found {num_results} results from files: {file_names}")
 
         return result
     except Exception as e:
@@ -204,7 +212,15 @@ def get_doc(collection_name: str, user: UserModel = None):
         result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
 
         if result:
-            log.info(f"query_doc:result {result.ids} {result.metadatas}")
+            # Log only essential info: number of results and file names
+            num_results = len(result.ids[0]) if result.ids and result.ids[0] else 0
+            file_names = []
+            if result.metadatas and result.metadatas[0]:
+                for metadata in result.metadatas[0]:
+                    file_name = metadata.get('name', 'unknown')
+                    file_names.append(file_name)
+            
+            log.info(f"get_doc: found {num_results} results from files: {file_names}")
 
         return result
     except Exception as e:
@@ -282,10 +298,15 @@ def query_doc_with_hybrid_search(
             "metadatas": [metadatas],
         }
 
-        log.info(
-            "query_doc_with_hybrid_search:result "
-            + f'{result["metadatas"]} {result["distances"]}'
-        )
+        # Log only essential info: number of results and file names
+        num_results = len(result["metadatas"][0]) if result["metadatas"] and result["metadatas"][0] else 0
+        file_names = []
+        if result["metadatas"] and result["metadatas"][0]:
+            for metadata in result["metadatas"][0]:
+                file_name = metadata.get('name', 'unknown')
+                file_names.append(file_name)
+        
+        log.info(f"query_doc_with_hybrid_search: found {num_results} results from files: {file_names}")
         return result
     except Exception as e:
         log.exception(f"Error querying doc {collection_name} with hybrid search: {e}")
