@@ -96,6 +96,49 @@ class TestLocalStorageProvider:
         assert not (upload_dir / self.filename).exists()
         assert not (upload_dir / self.filename_extra).exists()
 
+    def test_delete_file_and_related(self, monkeypatch, tmp_path):
+        upload_dir = mock_upload_dir(monkeypatch, tmp_path)
+        
+        # Create original file and related files
+        original_filename = "test_video.mp4"
+        mp3_filename = "test_video.mp3"
+        json_filename = "test_video.json"
+        
+        (upload_dir / original_filename).write_bytes(self.file_content)
+        (upload_dir / mp3_filename).write_bytes(b"mp3 content")
+        (upload_dir / json_filename).write_bytes(b'{"text": "transcript"}')
+        
+        # Verify files exist
+        assert (upload_dir / original_filename).exists()
+        assert (upload_dir / mp3_filename).exists()
+        assert (upload_dir / json_filename).exists()
+        
+        # Delete file and related files
+        file_path = str(upload_dir / original_filename)
+        self.Storage.delete_file_and_related(file_path)
+        
+        # Verify all files are deleted
+        assert not (upload_dir / original_filename).exists()
+        assert not (upload_dir / mp3_filename).exists()
+        assert not (upload_dir / json_filename).exists()
+
+    def test_delete_file_and_related_no_related_files(self, monkeypatch, tmp_path):
+        upload_dir = mock_upload_dir(monkeypatch, tmp_path)
+        
+        # Create only original file
+        original_filename = "test_video.mp4"
+        (upload_dir / original_filename).write_bytes(self.file_content)
+        
+        # Verify file exists
+        assert (upload_dir / original_filename).exists()
+        
+        # Delete file and related files
+        file_path = str(upload_dir / original_filename)
+        self.Storage.delete_file_and_related(file_path)
+        
+        # Verify original file is deleted
+        assert not (upload_dir / original_filename).exists()
+
 
 @mock_aws
 class TestS3StorageProvider:

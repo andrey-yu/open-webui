@@ -821,7 +821,7 @@
 	};
 
 	const selectTemplate = () => {
-		if (value !== '') {
+		if (value !== '' && value !== null && value !== undefined) {
 			// After updating the state, try to find and select the next template
 			setTimeout(() => {
 				const templateFound = selectNextTemplate(editor.view.state, editor.view.dispatch);
@@ -860,11 +860,11 @@
 	});
 
 	onMount(async () => {
-		content = value;
+		content = value || '';
 
 		if (json) {
 			if (!content) {
-				content = html ? html : null;
+				content = html ? html : '';
 			}
 		} else {
 			if (preserveBreaks) {
@@ -880,13 +880,13 @@
 				async function tryParse(value, attempts = 3, interval = 100) {
 					try {
 						// Try parsing the value
-						return marked.parse(value.replaceAll(`\n<br/>`, `<br/>`), {
+						return marked.parse((value || '').replaceAll(`\n<br/>`, `<br/>`), {
 							breaks: false
 						});
 					} catch (error) {
 						// If no attempts remain, fallback to plain text
 						if (attempts <= 1) {
-							return value;
+							return value || '';
 						}
 						// Wait for the interval, then retry
 						await new Promise((resolve) => setTimeout(resolve, interval));
@@ -1220,7 +1220,7 @@
 		}
 	});
 
-	$: if (value !== null && editor && !collaboration) {
+	$: if (value !== null && value !== undefined && editor && !collaboration) {
 		onValueChange();
 	}
 
@@ -1238,7 +1238,7 @@
 			)
 			.replace(/\u00a0/g, ' ');
 
-		if (value === '') {
+		if (value === '' || value === null || value === undefined) {
 			editor.commands.clearContent(); // Clear content if value is empty
 			selectTemplate();
 
@@ -1246,22 +1246,22 @@
 		}
 
 		if (json) {
-			if (JSON.stringify(value) !== JSON.stringify(jsonValue)) {
-				editor.commands.setContent(value);
+			if (JSON.stringify(value || null) !== JSON.stringify(jsonValue)) {
+				editor.commands.setContent(value || '');
 				selectTemplate();
 			}
 		} else {
 			if (raw) {
-				if (value !== htmlValue) {
-					editor.commands.setContent(value);
+				if ((value || '') !== htmlValue) {
+					editor.commands.setContent(value || '');
 					selectTemplate();
 				}
 			} else {
-				if (value !== mdValue) {
+				if ((value || '') !== mdValue) {
 					editor.commands.setContent(
 						preserveBreaks
-							? value
-							: marked.parse(value.replaceAll(`\n<br/>`, `<br/>`), {
+							? value || ''
+							: marked.parse((value || '').replaceAll(`\n<br/>`, `<br/>`), {
 									breaks: false
 								})
 					);

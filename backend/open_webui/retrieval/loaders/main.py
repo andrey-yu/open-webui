@@ -27,6 +27,13 @@ from open_webui.retrieval.loaders.external_document import ExternalDocumentLoade
 from open_webui.retrieval.loaders.mistral import MistralLoader
 from open_webui.retrieval.loaders.datalab_marker import DatalabMarkerLoader
 
+# Import our custom OCR loader
+try:
+    from .rapidocr_pdf import RapidOCRPDFLoader, RAPIDOCR_AVAILABLE
+    # Don't call is_rapidocr_available() at import time to avoid initialization issues
+except ImportError:
+    RAPIDOCR_AVAILABLE = False
+
 
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL
 
@@ -206,6 +213,42 @@ class DoclingLoader:
             raise Exception(f"Error calling Docling: {error_msg}")
 
 
+class MediaFileLoader:
+    """Loader for media files (audio/video) that provides metadata but no content extraction"""
+    
+    def __init__(self, file_path, filename, mime_type):
+        self.file_path = file_path
+        self.filename = filename
+        self.mime_type = mime_type
+    
+    def load(self) -> list[Document]:
+        """Load media file metadata without content extraction"""
+        import os
+        
+        # Get file size
+        file_size = os.path.getsize(self.file_path) if os.path.exists(self.file_path) else 0
+        
+        # Create metadata document
+        content = f"Media file: {self.filename}\nType: {self.mime_type}\nSize: {file_size} bytes"
+        
+        if self.mime_type.startswith("video/"):
+            content += "\n\nNote: This is a video file. To extract content, enable transcription in your settings."
+        elif self.mime_type.startswith("audio/"):
+            content += "\n\nNote: This is an audio file. To extract content, enable transcription in your settings."
+        
+        return [
+            Document(
+                page_content=content,
+                metadata={
+                    "source": self.filename,
+                    "file_type": "media",
+                    "mime_type": self.mime_type,
+                    "file_size": file_size
+                }
+            )
+        ]
+
+
 class Loader:
     def __init__(self, engine: str = "", **kwargs):
         self.engine = engine
@@ -214,15 +257,37 @@ class Loader:
     def load(
         self, filename: str, file_content_type: str, file_path: str
     ) -> list[Document]:
-        loader = self._get_loader(filename, file_content_type, file_path)
-        docs = loader.load()
+        log.info(f"Starting content extraction for {filename} (type: {file_content_type}) using engine: {self.engine}")
+        
+        try:
+            loader = self._get_loader(filename, file_content_type, file_path)
+            log.info(f"Using loader: {loader.__class__.__name__}")
+            
+            docs = loader.load()
+            
+            # Log content extraction results for debugging
+            if not docs:
+                log.warning(f"No documents extracted from {filename} using {loader.__class__.__name__}")
+            else:
+                total_content_length = sum(len(doc.page_content) for doc in docs)
+                log.info(f"Extracted {len(docs)} documents from {filename} with total content length: {total_content_length}")
+                
+                # Log first few characters of content for debugging
+                if docs and docs[0].page_content:
+                    preview = docs[0].page_content[:200].replace('\n', ' ').strip()
+                    log.info(f"Content preview: {preview}...")
+                else:
+                    log.warning(f"First document has empty content")
 
-        return [
-            Document(
-                page_content=ftfy.fix_text(doc.page_content), metadata=doc.metadata
-            )
-            for doc in docs
-        ]
+            return [
+                Document(
+                    page_content=ftfy.fix_text(doc.page_content), metadata=doc.metadata
+                )
+                for doc in docs
+            ]
+        except Exception as e:
+            log.error(f"Error during content extraction for {filename}: {str(e)}")
+            raise
 
     def _is_text_file(self, file_ext: str, file_content_type: str) -> bool:
         return file_ext in known_source_ext or (
@@ -232,8 +297,21 @@ class Loader:
             and not file_content_type.find("html") >= 0
         )
 
+    def _is_media_file(self, file_ext: str, file_content_type: str) -> bool:
+        """Check if the file is a media file (audio/video)"""
+        media_extensions = [
+            "mp4", "webm", "avi", "mov", "wmv", "flv", "mkv", "3gp", "ogg",
+            "mp3", "wav", "m4a", "aac", "flac"
+        ]
+        return (
+            file_ext in media_extensions or
+            (file_content_type and file_content_type.startswith("video/")) or
+            (file_content_type and file_content_type.startswith("audio/"))
+        )
+
     def _get_loader(self, filename: str, file_content_type: str, file_path: str):
         file_ext = filename.split(".")[-1].lower()
+        log.info(f"_get_loader called for {filename} with engine: {self.engine}, file_ext: {file_ext}")
 
         if (
             self.engine == "external"
@@ -340,6 +418,30 @@ class Loader:
                 api_key=self.kwargs.get("DOCUMENT_INTELLIGENCE_KEY"),
             )
         elif (
+            self.engine == "rapidocr"
+            and RAPIDOCR_AVAILABLE
+            and file_ext == "pdf"
+        ):
+            log.info(f"RapidOCR condition matched!")
+            log.info(f"RapidOCR engine selected for PDF processing")
+            log.info(f"RAPIDOCR_AVAILABLE: {RAPIDOCR_AVAILABLE}")
+            try:
+                log.info(f"Using RapidOCR engine for PDF processing")
+                # Check if RapidOCR is actually available at runtime
+                from .rapidocr_pdf import is_rapidocr_available
+                log.info("Importing is_rapidocr_available...")
+                if not is_rapidocr_available():
+                    raise ImportError("RapidOCR is not available at runtime")
+                
+                log.info("Creating RapidOCRPDFLoader...")
+                loader = RapidOCRPDFLoader(file_path, extract_images=True)
+                log.info("RapidOCRPDFLoader created successfully")
+            except Exception as e:
+                log.warning(f"RapidOCR failed to initialize: {str(e)}, falling back to PyPDFLoader")
+                # Fallback to PyPDFLoader if RapidOCR fails
+                pdf_extract_images = self.kwargs.get("PDF_EXTRACT_IMAGES")
+                loader = PyPDFLoader(file_path, extract_images=pdf_extract_images)
+        elif (
             self.engine == "mistral_ocr"
             and self.kwargs.get("MISTRAL_OCR_API_KEY") != ""
             and file_ext
@@ -359,9 +461,26 @@ class Loader:
             )
         else:
             if file_ext == "pdf":
-                loader = PyPDFLoader(
-                    file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES")
-                )
+                pdf_extract_images = self.kwargs.get("PDF_EXTRACT_IMAGES")
+                
+                # Try RapidOCR first if available and PDF image extraction is enabled
+                if RAPIDOCR_AVAILABLE and pdf_extract_images:
+                    try:
+                        log.info(f"Creating RapidOCRPDFLoader for {filename} (OCR-based extraction)")
+                        # Check if RapidOCR is actually available at runtime
+                        from .rapidocr_pdf import is_rapidocr_available
+                        if not is_rapidocr_available():
+                            raise ImportError("RapidOCR is not available at runtime")
+                        
+                        loader = RapidOCRPDFLoader(file_path, extract_images=pdf_extract_images)
+                    except Exception as e:
+                        log.warning(f"RapidOCR failed to initialize: {str(e)}, falling back to PyPDFLoader")
+                        loader = PyPDFLoader(file_path, extract_images=pdf_extract_images)
+                else:
+                    log.info(f"Creating PyPDFLoader for {filename} with extract_images={pdf_extract_images}")
+                    loader = PyPDFLoader(
+                        file_path, extract_images=pdf_extract_images
+                    )
             elif file_ext == "csv":
                 loader = CSVLoader(file_path, autodetect_encoding=True)
             elif file_ext == "rst":
@@ -394,6 +513,9 @@ class Loader:
                 loader = OutlookMessageLoader(file_path)
             elif file_ext == "odt":
                 loader = UnstructuredODTLoader(file_path)
+            elif self._is_media_file(file_ext, file_content_type):
+                # Handle media files (audio/video) with metadata only
+                loader = MediaFileLoader(file_path, filename, file_content_type)
             elif self._is_text_file(file_ext, file_content_type):
                 loader = TextLoader(file_path, autodetect_encoding=True)
             else:

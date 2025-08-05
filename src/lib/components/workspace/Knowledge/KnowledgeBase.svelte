@@ -17,12 +17,15 @@
 		user,
 		settings
 	} from '$lib/stores';
+	import { progressStore } from '$lib/stores/progress';
 
 	import {
 		updateFileDataContentById,
 		uploadFile,
 		deleteFileById,
-		getFileById
+		getFileById,
+		getFileDataContentById,
+		transcribeFileById
 	} from '$lib/apis/files';
 	import {
 		addFileToKnowledgeById,
@@ -31,9 +34,12 @@
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
-		updateKnowledgeById
+		updateKnowledgeById,
+		addGoogleDriveFileToKnowledge,
+		addGoogleDriveFolderToKnowledge
 	} from '$lib/apis/knowledge';
 	import { blobToFile } from '$lib/utils';
+	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
@@ -196,6 +202,181 @@
 			}
 		} catch (e) {
 			toast.error(`${e}`);
+		}
+	};
+
+	// Google Drive integration handlers
+	const uploadGoogleDriveFileHandler = async () => {
+		console.log('=== uploadGoogleDriveFileHandler called ===');
+		try {
+			const fileData = await createPicker();
+			console.log('File data from picker:', fileData);
+			if (fileData) {
+				// Get OAuth token for server-side processing
+				const oauthToken = await getAuthToken();
+				console.log('OAuth token obtained');
+				
+				// Show initial progress message
+				toast.info($i18n.t('Processing Google Drive file...'));
+				
+				// Add file to knowledge base using server-side API
+				console.log('Calling addGoogleDriveFileToKnowledge API');
+				const result = await addGoogleDriveFileToKnowledge(
+					localStorage.token,
+					id,
+					fileData.id,
+					oauthToken
+				);
+				console.log('API result:', result);
+
+				if (result && result.session_id) {
+					// Create session and start tracking with the real session ID
+					console.log('Creating session with real session ID:', result.session_id);
+					
+					// Import and create session
+					import('$lib/stores/progress.js').then(({ progressStore }) => {
+						progressStore.startSession(result.session_id, 1, [fileData.name || fileData.id]);
+					});
+					
+					// Start SSE tracking
+					console.log('Starting SSE tracking for real session:', result.session_id);
+					import('$lib/utils/sse.js').then(({ startProgressTracking }) => {
+						startProgressTracking(result.session_id, () => {
+							// Refresh knowledge base data when session completes
+							loadKnowledgeData();
+						}).catch((error) => {
+							console.error('SSE connection failed:', error);
+							// Only show error for actual connection failures, not timeouts
+							if (error.message.includes('max retries')) {
+								toast.error($i18n.t('Failed to establish progress tracking connection. Progress updates may not be visible.'));
+							}
+						});
+					});
+					
+					// Refresh knowledge base data
+					await loadKnowledgeData();
+					// Progress will be shown via SSE events
+				}
+			} else {
+				console.log('No file was selected from Google Drive');
+			}
+		} catch (error) {
+			console.error('Google Drive Error:', error);
+			
+			// Provide more specific error messages
+			let errorMessage = error.message;
+			if (error.message.includes('empty content') || error.message.includes('Could not extract content')) {
+				errorMessage = 'The file could not be processed. This may be because it\'s empty, corrupted, or in an unsupported format. For video/audio files, ensure transcription is enabled in your settings.';
+			} else if (error.message.includes('not supported for processing')) {
+				errorMessage = 'This file type is not supported for processing. Please try a different file format.';
+			} else if (error.message.includes('Media files (audio/video) are supported')) {
+				errorMessage = error.message;
+			}
+			
+			toast.error(
+				$i18n.t('Error accessing Google Drive: {{error}}', {
+					error: errorMessage
+				})
+			);
+		}
+	};
+
+	const uploadGoogleDriveFolderHandler = async () => {
+		try {
+			console.log('=== uploadGoogleDriveFolderHandler called ===');
+			// Use the enhanced picker with folder support
+			const folderData = await createPicker(true); // includeFolders = true
+			
+			console.log('Google Drive folder picker result:', folderData);
+			
+			if (folderData && folderData.type === 'folder') {
+				// Get OAuth token for server-side processing
+				const oauthToken = await getAuthToken();
+				
+				// Show initial progress message
+				toast.info($i18n.t('Processing Google Drive folder... This may take a while.'));
+				
+				// Add folder to knowledge base using server-side API
+				const result = await addGoogleDriveFolderToKnowledge(
+					localStorage.token,
+					id,
+					folderData.id,
+					oauthToken,
+					true // recursive
+				);
+
+				if (result) {
+					// Refresh knowledge base data
+					await loadKnowledgeData();
+					
+					// Show success message with warnings if any
+					if (result.warnings) {
+						toast.success(result.warnings.message);
+					}
+					// Progress will be shown via WebSocket events
+				}
+			} else if (folderData && folderData.type === 'file') {
+				// User selected a file instead of a folder, handle it as a single file
+				const oauthToken = await getAuthToken();
+				
+				toast.info($i18n.t('Processing Google Drive file...'));
+				
+				// Make API call and get session ID from response
+				const result = await addGoogleDriveFileToKnowledge(
+					localStorage.token,
+					id,
+					folderData.id,
+					oauthToken
+				);
+
+				if (result && result.session_id) {
+					// Create session and start tracking with the real session ID
+					console.log('Creating session with real session ID (folder flow):', result.session_id);
+					
+					// Import and create session
+					import('$lib/stores/progress.js').then(({ progressStore }) => {
+						progressStore.startSession(result.session_id, 1, [folderData.name || folderData.id]);
+					});
+					
+					// Start SSE tracking
+					console.log('Starting SSE tracking for real session (folder flow):', result.session_id);
+					import('$lib/utils/sse.js').then(({ startProgressTracking }) => {
+						startProgressTracking(result.session_id, () => {
+							// Refresh knowledge base data when session completes
+							loadKnowledgeData();
+						}).catch((error) => {
+							console.error('SSE connection failed (folder flow):', error);
+							// Only show error for actual connection failures, not timeouts
+							if (error.message.includes('max retries')) {
+								toast.error($i18n.t('Failed to establish progress tracking connection. Progress updates may not be visible.'));
+							}
+						});
+					});
+					
+					await loadKnowledgeData();
+					// Progress will be shown via SSE events
+				}
+			} else {
+				console.log('No folder was selected from Google Drive');
+			}
+		} catch (error) {
+			console.error('Google Drive Folder Error:', error);
+			
+			// Provide more specific error messages
+			let errorMessage = error.message;
+			if (error.message.includes('empty content') || error.message.includes('Could not extract content')) {
+				errorMessage = 'Some files could not be processed. This may be because they are empty, corrupted, or in an unsupported format. For video/audio files, ensure transcription is enabled in your settings.';
+			} else if (error.message.includes('not supported for processing')) {
+				errorMessage = 'Some file types are not supported for processing. Please try different file formats.';
+			} else if (error.message.includes('Media files (audio/video) are supported')) {
+				errorMessage = error.message;
+			}
+			
+			toast.error(
+				$i18n.t('Error accessing Google Drive folder: {{error}}', {
+					error: errorMessage
+				})
+			);
 		}
 	};
 
@@ -477,6 +658,25 @@
 		}
 	};
 
+	const transcribeFileHandler = async (file) => {
+		try {
+			toast.info($i18n.t('Transcribing file... This may take a few minutes.'));
+			
+			const response = await transcribeFileById(localStorage.token, file.id);
+			
+			if (response && response.content !== undefined) {
+				selectedFileContent = response.content;
+				// Cache the content
+				fileContentCache.set(file.id, response.content);
+				toast.success($i18n.t('File transcribed successfully!'));
+			} else {
+				toast.error($i18n.t('Failed to transcribe file.'));
+			}
+		} catch (e) {
+			toast.error($i18n.t('Failed to transcribe file: ') + e);
+		}
+	};
+
 	const fileSelectHandler = async (file) => {
 		try {
 			selectedFile = file;
@@ -487,15 +687,24 @@
 				return;
 			}
 
-			const response = await getFileById(localStorage.token, file.id);
-			if (response) {
-				selectedFileContent = response.data.content;
+			const response = await getFileDataContentById(localStorage.token, file.id);
+			
+			if (response && response.content !== undefined && response.content.trim() !== '') {
+				selectedFileContent = response.content;
 				// Cache the content
-				fileContentCache.set(file.id, response.data.content);
+				fileContentCache.set(file.id, response.content);
 			} else {
-				toast.error($i18n.t('No content found in file.'));
+				// If no content found, show appropriate message
+				selectedFileContent = '';
+				if (file.meta?.content_type?.startsWith('video/') || file.meta?.content_type?.startsWith('audio/')) {
+					// Don't show error for video/audio files, just set empty content
+					// The UI will show a transcription button
+				} else {
+					toast.error($i18n.t('No content found in file.'));
+				}
 			}
 		} catch (e) {
+			selectedFileContent = '';
 			toast.error($i18n.t('Failed to load file content.'));
 		}
 	};
@@ -531,6 +740,19 @@
 					toast.error($i18n.t(`File not found.`));
 				}
 			}
+		}
+	};
+
+	const loadKnowledgeData = async () => {
+		if (!id) return;
+		
+		const res = await getKnowledgeById(localStorage.token, id).catch((e) => {
+			toast.error(`${e}`);
+			return null;
+		});
+
+		if (res) {
+			knowledge = res;
 		}
 	};
 
@@ -775,14 +997,31 @@
 							<div
 								class=" flex-1 w-full h-full max-h-full text-sm bg-transparent outline-hidden overflow-y-auto scrollbar-hidden"
 							>
-								{#key selectedFile.id}
-									<RichTextInput
-										className="input-prose-sm"
-										bind:value={selectedFileContent}
-										placeholder={$i18n.t('Add content here')}
-										preserveBreaks={false}
-									/>
-								{/key}
+								{#if (selectedFile.meta?.content_type?.startsWith('video/') || selectedFile.meta?.content_type?.startsWith('audio/')) && (!selectedFileContent || selectedFileContent.trim() === '')}
+									<div class="flex flex-col items-center justify-center h-full text-center p-8">
+										<div class="text-lg font-medium mb-4">
+											{$i18n.t('Video/Audio File')}
+										</div>
+										<div class="text-sm text-gray-500 dark:text-gray-400 mb-6 max-w-md">
+											{$i18n.t('This video/audio file needs to be transcribed to extract its content. Click the button below to start transcription.')}
+										</div>
+										<button
+											class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+											on:click={() => transcribeFileHandler(selectedFile)}
+										>
+											{$i18n.t('Transcribe File')}
+										</button>
+									</div>
+								{:else}
+									{#key selectedFile.id}
+										<RichTextInput
+											className="input-prose-sm"
+											bind:value={selectedFileContent}
+											placeholder={$i18n.t('Add content here')}
+											preserveBreaks={false}
+										/>
+									{/key}
+								{/if}
 							</div>
 						</div>
 					{:else}
@@ -833,14 +1072,31 @@
 							<div
 								class=" flex-1 w-full h-full max-h-full py-2.5 px-3.5 rounded-lg text-sm bg-transparent overflow-y-auto scrollbar-hidden"
 							>
-								{#key selectedFile.id}
-									<RichTextInput
-										className="input-prose-sm"
-										bind:value={selectedFileContent}
-										placeholder={$i18n.t('Add content here')}
-										preserveBreaks={false}
-									/>
-								{/key}
+								{#if (selectedFile.meta?.content_type?.startsWith('video/') || selectedFile.meta?.content_type?.startsWith('audio/')) && (!selectedFileContent || selectedFileContent.trim() === '')}
+									<div class="flex flex-col items-center justify-center h-full text-center p-8">
+										<div class="text-lg font-medium mb-4">
+											{$i18n.t('Video/Audio File')}
+										</div>
+										<div class="text-sm text-gray-500 dark:text-gray-400 mb-6 max-w-md">
+											{$i18n.t('This video/audio file needs to be transcribed to extract its content. Click the button below to start transcription.')}
+										</div>
+										<button
+											class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+											on:click={() => transcribeFileHandler(selectedFile)}
+										>
+											{$i18n.t('Transcribe File')}
+										</button>
+									</div>
+								{:else}
+									{#key selectedFile.id}
+										<RichTextInput
+											className="input-prose-sm"
+											bind:value={selectedFileContent}
+											placeholder={$i18n.t('Add content here')}
+											preserveBreaks={false}
+										/>
+									{/key}
+								{/if}
 							</div>
 						</div>
 					</div>
@@ -880,6 +1136,10 @@
 												uploadDirectoryHandler();
 											} else if (e.detail.type === 'text') {
 												showAddTextContentModal = true;
+											} else if (e.detail.type === 'google-drive-file') {
+												uploadGoogleDriveFileHandler();
+											} else if (e.detail.type === 'google-drive-folder') {
+												uploadGoogleDriveFolderHandler();
 											} else {
 												document.getElementById('files-input').click();
 											}

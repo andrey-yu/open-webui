@@ -166,7 +166,7 @@ def upload_file(
                             stt_supported_content_types
                             if stt_supported_content_types
                             and any(t.strip() for t in stt_supported_content_types)
-                            else ["audio/*", "video/webm"]
+                            else ["audio/*", "video/*"]
                         )
                     ):
                         file_path = Storage.get_file(file_path)
@@ -404,6 +404,67 @@ async def update_file_data_content_by_id(
         )
 
 
+@router.post("/{id}/transcribe")
+async def transcribe_file_by_id(
+    request: Request, id: str, user=Depends(get_verified_user)
+):
+    """
+    Manually trigger transcription for a video/audio file
+    """
+    file = Files.get_file_by_id(id)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user)
+    ):
+        try:
+            # Check if file is video/audio
+            content_type = file.meta.get("content_type", "") if file.meta else ""
+            
+            if not (content_type.startswith("video/") or content_type.startswith("audio/")):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="File is not a video or audio file",
+                )
+
+            # Get file path and transcribe
+            file_path = Storage.get_file(file.path)
+            result = transcribe(request, file_path, {"source": "manual-transcription"})
+
+            # Process the file with transcribed content
+            from open_webui.routers.retrieval import process_file, ProcessFileForm
+            
+            process_file(
+                request,
+                ProcessFileForm(file_id=id, content=result.get("text", "")),
+                user=user,
+            )
+
+            # Get updated file
+            file = Files.get_file_by_id(id=id)
+            
+            return {"content": file.data.get("content", ""), "message": "File transcribed successfully"}
+            
+        except Exception as e:
+            log.exception(e)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to transcribe file: {str(e)}",
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
 ############################
 # Get File Content By Id
 ############################
@@ -609,7 +670,7 @@ async def delete_file_by_id(id: str, user=Depends(get_verified_user)):
         result = Files.delete_file_by_id(id)
         if result:
             try:
-                Storage.delete_file(file.path)
+                Storage.delete_file_and_related(file.path)
                 VECTOR_DB_CLIENT.delete(collection_name=f"file-{id}")
             except Exception as e:
                 log.exception(e)

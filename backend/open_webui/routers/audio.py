@@ -936,7 +936,7 @@ def transcription(
             stt_supported_content_types
             if stt_supported_content_types
             and any(t.strip() for t in stt_supported_content_types)
-            else ["audio/*", "video/webm"]
+            else ["audio/*", "video/*"]
         )
     ):
         raise HTTPException(

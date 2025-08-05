@@ -694,7 +694,9 @@ try:
         for item in STATIC_DIR.iterdir():
             if item.is_file() or item.is_symlink():
                 try:
-                    item.unlink()
+                    # item.unlink()
+                    # TODO: Uncomment this when we are sure it's safe to delete
+                    print(f"TODO: Would delete {item}")
                 except Exception as e:
                     pass
 except Exception as e:

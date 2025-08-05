@@ -80,6 +80,7 @@ class ERROR_MESSAGES(str, Enum):
     API_KEY_CREATION_NOT_ALLOWED = "API key creation is not allowed in the environment."
 
     EMPTY_CONTENT = "The content provided is empty. Please ensure that there is text or data present before proceeding."
+    MEDIA_FILE_NO_TRANSCRIPTION = "Media files (audio/video) are supported but require transcription to extract content. Please enable transcription in your settings."
 
     DB_NOT_SQLITE = "This feature is only available when running with SQLite databases."
 

@@ -40,7 +40,7 @@ from open_webui.storage.provider import Storage
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
 # Document loaders
-from open_webui.retrieval.loaders.main import Loader
+from open_webui.retrieval.loaders.main import Loader, RAPIDOCR_AVAILABLE
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
 
 # Web search engines
@@ -1222,7 +1222,13 @@ def save_docs_to_vector_db(
             raise ValueError(ERROR_MESSAGES.DEFAULT("Invalid text splitter"))
 
     if len(docs) == 0:
+        log.error(f"Empty documents list provided to save_docs_to_vector_db for collection {collection_name}")
         raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
+
+    # Check for documents with empty content
+    empty_docs = [i for i, doc in enumerate(docs) if not doc.page_content or not doc.page_content.strip()]
+    if empty_docs:
+        log.warning(f"Found {len(empty_docs)} documents with empty content at indices: {empty_docs}")
 
     texts = [doc.page_content for doc in docs]
     metadatas = [
@@ -1403,6 +1409,13 @@ def process_file(
             file_path = file.path
             if file_path:
                 file_path = Storage.get_file(file_path)
+                
+                # Log the processing configuration
+                content_extraction_engine = request.app.state.config.CONTENT_EXTRACTION_ENGINE
+                pdf_extract_images = request.app.state.config.PDF_EXTRACT_IMAGES
+                log.info(f"Processing file {file.filename} with engine: {content_extraction_engine}, PDF extract images: {pdf_extract_images}")
+                log.info("=== DEBUG: This is a test message to verify our changes are loaded ===")
+                
                 loader = Loader(
                     engine=request.app.state.config.CONTENT_EXTRACTION_ENGINE,
                     DATALAB_MARKER_API_KEY=request.app.state.config.DATALAB_MARKER_API_KEY,
@@ -1431,9 +1444,12 @@ def process_file(
                     DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
                     MISTRAL_OCR_API_KEY=request.app.state.config.MISTRAL_OCR_API_KEY,
                 )
+                log.info(f"Loader created successfully: {loader.__class__.__name__}")
+                log.info(f"About to call loader.load() for {file.filename}")
                 docs = loader.load(
                     file.filename, file.meta.get("content_type"), file_path
                 )
+                log.info(f"loader.load() completed, got {len(docs) if docs else 0} documents")
 
                 docs = [
                     Document(
@@ -1464,6 +1480,57 @@ def process_file(
             text_content = " ".join([doc.page_content for doc in docs])
 
         log.debug(f"text_content: {text_content}")
+        
+        # Check if content is empty before proceeding
+        if not text_content or not text_content.strip():
+            log.warning(f"Empty content extracted from file {file.filename} (ID: {file.id})")
+            
+            # Try RapidOCR as fallback for PDFs if available
+            if (file.filename.lower().endswith('.pdf') and 
+                RAPIDOCR_AVAILABLE and 
+                (not request.app.state.config.CONTENT_EXTRACTION_ENGINE or 
+                 request.app.state.config.CONTENT_EXTRACTION_ENGINE == "rapidocr")):
+                
+                log.info(f"Attempting RapidOCR fallback for PDF {file.filename}")
+                try:
+                    from open_webui.retrieval.loaders.rapidocr_pdf import RapidOCRPDFLoader, is_rapidocr_available
+                    
+                    # Check if RapidOCR is available
+                    if not is_rapidocr_available():
+                        log.warning("RapidOCR is not available for fallback")
+                        raise ValueError("RapidOCR is not available")
+                    
+                    # Get the file path for the fallback
+                    fallback_file_path = file.path
+                    if fallback_file_path:
+                        fallback_file_path = Storage.get_file(fallback_file_path)
+                    
+                    log.info("Creating RapidOCR loader...")
+                    # Create RapidOCR loader
+                    ocr_loader = RapidOCRPDFLoader(fallback_file_path, extract_images=True)
+                    
+                    log.info("Loading PDF with RapidOCR...")
+                    ocr_docs = ocr_loader.load()
+                    
+                    if ocr_docs and ocr_docs[0].page_content.strip():
+                        log.info(f"RapidOCR successfully extracted {len(ocr_docs[0].page_content)} characters")
+                        
+                        # Update the docs and text_content with OCR results
+                        docs = ocr_docs
+                        text_content = ocr_docs[0].page_content
+                        
+                        # Continue with the OCR-extracted content
+                        log.info(f"Using OCR-extracted content for {file.filename}")
+                    else:
+                        log.warning("RapidOCR returned empty content")
+                        raise ValueError("RapidOCR also failed to extract content")
+                        
+                except Exception as ocr_error:
+                    log.error(f"RapidOCR fallback also failed: {str(ocr_error)}")
+                    raise ValueError("No content could be extracted from the file. This may be because the file is empty, corrupted, password-protected, or uses an unsupported format.")
+            else:
+                raise ValueError("No content could be extracted from the file. This may be because the file is empty, corrupted, password-protected, or uses an unsupported format.")
+        
         Files.update_file_data_by_id(
             file.id,
             {"content": text_content},

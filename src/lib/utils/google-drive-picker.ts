@@ -1,19 +1,28 @@
+// TypeScript declarations for Google APIs
+declare const gapi: any;
+declare const google: any;
+
 // Google Drive Picker API configuration
 let API_KEY = '';
 let CLIENT_ID = '';
 
+// Import constants and API functions
+import { WEBUI_BASE_URL } from '../constants';
+import { getBackendConfig } from '../apis';
+
 // Function to fetch credentials from backend config
 async function getCredentials() {
-	const response = await fetch('/api/config');
-	if (!response.ok) {
-		throw new Error('Failed to fetch Google Drive credentials');
-	}
-	const config = await response.json();
-	API_KEY = config.google_drive?.api_key;
-	CLIENT_ID = config.google_drive?.client_id;
+	try {
+		const config = await getBackendConfig();
+		console.log('config', config);
+		API_KEY = config.google_drive?.api_key;
+		CLIENT_ID = config.google_drive?.client_id;
 
-	if (!API_KEY || !CLIENT_ID) {
-		throw new Error('Google Drive API credentials not configured');
+		if (!API_KEY || !CLIENT_ID) {
+			throw new Error('Google Drive API credentials not configured. Please log in to access Google Drive integration.');
+		}
+	} catch (error) {
+		throw new Error('Failed to fetch Google Drive credentials. Please ensure you are logged in.');
 	}
 }
 const SCOPE = [
@@ -49,7 +58,7 @@ export const loadGoogleDriveApi = () => {
 			script.onerror = reject;
 			document.body.appendChild(script);
 		} else {
-			gapi.load('picker', () => {
+			gapi!.load('picker', () => {
 				pickerApiLoaded = true;
 				resolve(true);
 			});
@@ -104,7 +113,7 @@ const initialize = async () => {
 	}
 };
 
-export const createPicker = () => {
+export const createPicker = (includeFolders: boolean = false) => {
 	return new Promise(async (resolve, reject) => {
 		try {
 			console.log('Initializing Google Drive Picker...');
@@ -122,10 +131,12 @@ export const createPicker = () => {
 				.enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
 				.addView(
 					new google.picker.DocsView()
-						.setIncludeFolders(false)
-						.setSelectFolderEnabled(false)
+						.setIncludeFolders(includeFolders)
+						.setSelectFolderEnabled(includeFolders)
 						.setMimeTypes(
-							'application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.google-apps.document,application/vnd.google-apps.spreadsheet,application/vnd.google-apps.presentation'
+							includeFolders 
+								? 'application/vnd.google-apps.folder,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.google-apps.document,application/vnd.google-apps.spreadsheet,application/vnd.google-apps.presentation,video/mp4,video/avi,video/mov,video/wmv,video/flv,video/webm,audio/m4a,audio/mp3,audio/wav,audio/ogg,audio/aac,audio/mp4,audio/x-m4a,audio/x-aac,audio/x-wav'
+								: 'application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.google-apps.document,application/vnd.google-apps.spreadsheet,application/vnd.google-apps.presentation,video/mp4,video/avi,video/mov,video/wmv,video/flv,video/webm,audio/m4a,audio/mp3,audio/wav,audio/ogg,audio/aac,audio/mp4,audio/x-m4a,audio/x-aac,audio/x-wav'
 						)
 				)
 				.setOAuthToken(token)
@@ -137,15 +148,33 @@ export const createPicker = () => {
 							const doc = data[google.picker.Response.DOCUMENTS][0];
 							const fileId = doc[google.picker.Document.ID];
 							const fileName = doc[google.picker.Document.NAME];
-							const fileUrl = doc[google.picker.Document.URL];
+							const mimeType = doc[google.picker.Document.MIME_TYPE];
+
+							console.log('Google Drive Picker - Selected file details:', {
+								fileId,
+								fileName,
+								mimeType,
+								fullDoc: doc
+							});
 
 							if (!fileId || !fileName) {
 								throw new Error('Required file details missing');
 							}
 
-							// Construct download URL based on MIME type
-							const mimeType = doc[google.picker.Document.MIME_TYPE];
+							// Check if it's a folder
+							if (mimeType === 'application/vnd.google-apps.folder') {
+								const result = {
+									id: fileId,
+									name: fileName,
+									type: 'folder',
+									mimeType: mimeType
+								};
+								resolve(result);
+								return;
+							}
 
+							// Handle files (existing logic)
+							const fileUrl = doc[google.picker.Document.URL];
 							let downloadUrl;
 							let exportFormat;
 
@@ -189,6 +218,8 @@ export const createPicker = () => {
 								name: fileName,
 								url: downloadUrl,
 								blob: blob,
+								type: 'file',
+								mimeType: mimeType,
 								headers: {
 									Authorization: `Bearer ${token}`,
 									Accept: '*/*'

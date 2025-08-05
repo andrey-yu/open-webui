@@ -716,3 +716,65 @@ def get_event_call(request_info):
 
 
 get_event_caller = get_event_call
+
+
+# Progress tracking events
+async def emit_progress_update(user_id: str, session_id: str, file_id: str, status: str, progress: int = 0, message: str = None, error: str = None):
+    """Emit progress update to a specific user"""
+    log.info(f"Emitting progress update: user_id={user_id}, session_id={session_id}, file_id={file_id}, status={status}, progress={progress}, message={message}")
+    if user_id in USER_POOL:
+        for sid in USER_POOL[user_id]:
+            await sio.emit("file-progress-update", {
+                "session_id": session_id,
+                "file_id": file_id,
+                "status": status,
+                "progress": progress,
+                "message": message,
+                "error": error
+            }, room=sid)
+        log.info(f"Progress update emitted to {len(USER_POOL[user_id])} sessions for user {user_id}")
+    else:
+        log.warning(f"User {user_id} not found in USER_POOL for progress update")
+
+
+async def emit_session_start(user_id: str, session_id: str, total_files: int, file_list: list):
+    """Emit session start to a specific user"""
+    log.info(f"Emitting session start: user_id={user_id}, session_id={session_id}, total_files={total_files}")
+    if user_id in USER_POOL:
+        for sid in USER_POOL[user_id]:
+            await sio.emit("processing-session-start", {
+                "session_id": session_id,
+                "total_files": total_files,
+                "file_list": file_list
+            }, room=sid)
+        log.info(f"Session start emitted to {len(USER_POOL[user_id])} sessions for user {user_id}")
+    else:
+        log.warning(f"User {user_id} not found in USER_POOL for session start")
+
+
+async def emit_session_complete(user_id: str, session_id: str):
+    """Emit session completion to a specific user"""
+    log.info(f"Emitting session complete: user_id={user_id}, session_id={session_id}")
+    if user_id in USER_POOL:
+        for sid in USER_POOL[user_id]:
+            await sio.emit("processing-session-complete", {
+                "session_id": session_id
+            }, room=sid)
+        log.info(f"Session complete emitted to {len(USER_POOL[user_id])} sessions for user {user_id}")
+    else:
+        log.warning(f"User {user_id} not found in USER_POOL for session complete")
+
+
+async def emit_filename_update(user_id: str, session_id: str, file_id: str, filename: str):
+    """Emit filename update to a specific user"""
+    log.info(f"Emitting filename update: user_id={user_id}, session_id={session_id}, file_id={file_id}, filename={filename}")
+    if user_id in USER_POOL:
+        for sid in USER_POOL[user_id]:
+            await sio.emit("filename-update", {
+                "session_id": session_id,
+                "file_id": file_id,
+                "filename": filename
+            }, room=sid)
+        log.info(f"Filename update emitted to {len(USER_POOL[user_id])} sessions for user {user_id}")
+    else:
+        log.warning(f"User {user_id} not found in USER_POOL for filename update")

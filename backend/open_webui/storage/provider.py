@@ -59,6 +59,10 @@ class StorageProvider(ABC):
     def delete_file(self, file_path: str) -> None:
         pass
 
+    @abstractmethod
+    def delete_file_and_related(self, file_path: str) -> None:
+        pass
+
 
 class LocalStorageProvider(StorageProvider):
     @staticmethod
@@ -87,6 +91,35 @@ class LocalStorageProvider(StorageProvider):
             os.remove(file_path)
         else:
             log.warning(f"File {file_path} not found in local storage.")
+
+    @staticmethod
+    def delete_file_and_related(file_path: str) -> None:
+        """Handles deletion of the file and related files (MP3, JSON) from local storage."""
+        filename = file_path.split("/")[-1]
+        file_path = f"{UPLOAD_DIR}/{filename}"
+        
+        # Get the base name without extension
+        base_name = os.path.splitext(filename)[0]
+        
+        # List of related file extensions to check and delete
+        related_extensions = ['.mp3', '.json']
+        
+        # Delete the original file
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+            log.info(f"Deleted file: {file_path}")
+        else:
+            log.warning(f"File {file_path} not found in local storage.")
+        
+        # Delete related files
+        for ext in related_extensions:
+            related_file_path = f"{UPLOAD_DIR}/{base_name}{ext}"
+            if os.path.isfile(related_file_path):
+                try:
+                    os.remove(related_file_path)
+                    log.info(f"Deleted related file: {related_file_path}")
+                except Exception as e:
+                    log.warning(f"Failed to delete related file {related_file_path}: {e}")
 
     @staticmethod
     def delete_all_files() -> None:
@@ -193,6 +226,17 @@ class S3StorageProvider(StorageProvider):
         # Always delete from local storage
         LocalStorageProvider.delete_file(file_path)
 
+    def delete_file_and_related(self, file_path: str) -> None:
+        """Handles deletion of the file and related files (MP3, JSON) from S3 storage."""
+        try:
+            s3_key = self._extract_s3_key(file_path)
+            self.s3_client.delete_object(Bucket=self.bucket_name, Key=s3_key)
+        except ClientError as e:
+            raise RuntimeError(f"Error deleting file from S3: {e}")
+
+        # Always delete from local storage including related files
+        LocalStorageProvider.delete_file_and_related(file_path)
+
     def delete_all_files(self) -> None:
         """Handles deletion of all files from S3 storage."""
         try:
@@ -271,6 +315,18 @@ class GCSStorageProvider(StorageProvider):
         # Always delete from local storage
         LocalStorageProvider.delete_file(file_path)
 
+    def delete_file_and_related(self, file_path: str) -> None:
+        """Handles deletion of the file and related files (MP3, JSON) from GCS storage."""
+        try:
+            filename = file_path.removeprefix("gs://").split("/")[1]
+            blob = self.bucket.get_blob(filename)
+            blob.delete()
+        except NotFound as e:
+            raise RuntimeError(f"Error deleting file from GCS: {e}")
+
+        # Always delete from local storage including related files
+        LocalStorageProvider.delete_file_and_related(file_path)
+
     def delete_all_files(self) -> None:
         """Handles deletion of all files from GCS storage."""
         try:
@@ -342,6 +398,18 @@ class AzureStorageProvider(StorageProvider):
 
         # Always delete from local storage
         LocalStorageProvider.delete_file(file_path)
+
+    def delete_file_and_related(self, file_path: str) -> None:
+        """Handles deletion of the file and related files (MP3, JSON) from Azure Blob Storage."""
+        try:
+            filename = file_path.split("/")[-1]
+            blob_client = self.container_client.get_blob_client(filename)
+            blob_client.delete_blob()
+        except ResourceNotFoundError as e:
+            raise RuntimeError(f"Error deleting file from Azure Blob Storage: {e}")
+
+        # Always delete from local storage including related files
+        LocalStorageProvider.delete_file_and_related(file_path)
 
     def delete_all_files(self) -> None:
         """Handles deletion of all files from Azure Blob Storage."""

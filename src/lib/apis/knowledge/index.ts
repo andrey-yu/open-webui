@@ -373,3 +373,74 @@ export const reindexKnowledgeFiles = async (token: string) => {
 
 	return res;
 };
+
+export const addGoogleDriveFileToKnowledge = async (
+	token: string,
+	knowledgeId: string,
+	fileId: string,
+	oauthToken: string
+) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/google-drive/file`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			file_id: fileId,
+			oauth_token: oauthToken
+		})
+	});
+
+	if (!res.ok) {
+		const error = await res.json();
+		throw error.detail || error;
+	}
+
+	const result = await res.json();
+	
+	// Start SSE progress tracking if session_id is provided
+	if (result.session_id) {
+		console.log('Starting SSE progress tracking for session:', result.session_id);
+		import('../../utils/sse.js').then(({ startProgressTracking }) => {
+			console.log('SSE module loaded, starting tracker');
+			startProgressTracking(result.session_id);
+		}).catch(error => {
+			console.error('Failed to load SSE module:', error);
+		});
+	} else {
+		console.log('No session_id in response, skipping SSE tracking');
+	}
+	
+
+
+	return result;
+};
+
+export const addGoogleDriveFolderToKnowledge = async (
+	token: string,
+	knowledgeId: string,
+	folderId: string,
+	oauthToken: string,
+	recursive: boolean = true
+) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/google-drive/folder`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			folder_id: folderId,
+			oauth_token: oauthToken,
+			recursive: recursive
+		})
+	});
+
+	if (!res.ok) {
+		const error = await res.json();
+		throw error.detail || error;
+	}
+
+	return res.json();
+};
