@@ -749,6 +749,29 @@ def process_file(
         else:
             log.info(f"Using provided collection name: {collection_name}")
 
+        # Check if file already exists in vector DB by file_id (for knowledge base mode)
+        if form_data.collection_name:
+            log.info(f"Checking for existing document with file_id: {file.id} in collection {collection_name}")
+            existing_docs = VECTOR_DB_CLIENT.query(
+                collection_name=collection_name,
+                filter={"file_id": file.id},
+            )
+
+            if existing_docs is not None and existing_docs.ids[0]:
+                log.info(f"Document with file_id {file.id} already exists in collection {collection_name}, skipping file")
+                raise ValueError(f"File already exists in collection {collection_name}")
+
+            # Fallback: Check by filename for files added before file_id metadata was consistent
+            log.info(f"Checking for existing document with filename: {file.filename} in collection {collection_name}")
+            existing_docs_by_name = VECTOR_DB_CLIENT.query(
+                collection_name=collection_name,
+                filter={"name": file.filename},
+            )
+
+            if existing_docs_by_name is not None and existing_docs_by_name.ids[0]:
+                log.info(f"Document with filename {file.filename} already exists in collection {collection_name}, skipping file")
+                raise ValueError(f"File with same name already exists in collection {collection_name}")
+
         if form_data.content:
             log.info("Processing with provided content (content update mode)")
             # Update the content in the file
@@ -1756,6 +1779,35 @@ def process_files_batch(
         try:
             text_content = file.data.get("content", "")
 
+            # Check if file already exists in vector DB by file_id (more reliable than hash for audio/video)
+            log.info(f"Checking for existing document with file_id: {file.id}")
+            existing_docs = VECTOR_DB_CLIENT.query(
+                collection_name=collection_name,
+                filter={"file_id": file.id},
+            )
+
+            if existing_docs is not None and existing_docs.ids[0]:
+                log.info(f"Document with file_id {file.id} already exists in collection {collection_name}, skipping file")
+                results.append(BatchProcessFilesResult(file_id=file.id, status="skipped", error="File already exists in collection"))
+                continue
+
+            # Fallback: Check by filename for files added before file_id metadata was consistent
+            log.info(f"Checking for existing document with filename: {file.filename}")
+            existing_docs_by_name = VECTOR_DB_CLIENT.query(
+                collection_name=collection_name,
+                filter={"name": file.filename},
+            )
+
+            if existing_docs_by_name is not None and existing_docs_by_name.ids[0]:
+                log.info(f"Document with filename {file.filename} already exists in collection {collection_name}, skipping file")
+                results.append(BatchProcessFilesResult(file_id=file.id, status="skipped", error="File with same name already exists in collection"))
+                continue
+
+            # Calculate hash for the file (for future deduplication)
+            hash = calculate_sha256_string(text_content)
+            Files.update_file_hash_by_id(file.id, hash)
+            Files.update_file_data_by_id(file.id, {"content": text_content})
+
             docs: List[Document] = [
                 Document(
                     page_content=text_content.replace("<br/>", "\n"),
@@ -1765,13 +1817,10 @@ def process_files_batch(
                         "created_by": file.user_id,
                         "file_id": file.id,
                         "source": file.filename,
+                        "hash": hash,  # Include hash in metadata for future deduplication
                     },
                 )
             ]
-
-            hash = calculate_sha256_string(text_content)
-            Files.update_file_hash_by_id(file.id, hash)
-            Files.update_file_data_by_id(file.id, {"content": text_content})
 
             all_docs.extend(docs)
             results.append(BatchProcessFilesResult(file_id=file.id, status="prepared"))
@@ -1795,19 +1844,21 @@ def process_files_batch(
 
             # Update all files with collection name
             for result in results:
-                Files.update_file_metadata_by_id(
-                    result.file_id, {"collection_name": collection_name}
-                )
-                result.status = "completed"
+                if result.status == "prepared":
+                    Files.update_file_metadata_by_id(
+                        result.file_id, {"collection_name": collection_name}
+                    )
+                    result.status = "completed"
 
         except Exception as e:
             log.error(
                 f"process_files_batch: Error saving documents to vector DB: {str(e)}"
             )
             for result in results:
-                result.status = "failed"
-                errors.append(
-                    BatchProcessFilesResult(file_id=result.file_id, error=str(e))
-                )
+                if result.status == "prepared":
+                    result.status = "failed"
+                    errors.append(
+                        BatchProcessFilesResult(file_id=result.file_id, error=str(e))
+                    )
 
     return BatchProcessFilesResponse(results=results, errors=errors)

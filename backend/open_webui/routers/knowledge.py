@@ -863,6 +863,8 @@ def add_files_to_knowledge_batch(
 
     # Only add files that were successfully processed
     successful_file_ids = [r.file_id for r in result.results if r.status == "completed"]
+    skipped_file_ids = [r.file_id for r in result.results if r.status == "skipped"]
+    
     for file_id in successful_file_ids:
         if file_id not in existing_file_ids:
             existing_file_ids.append(file_id)
@@ -870,16 +872,27 @@ def add_files_to_knowledge_batch(
     data["file_ids"] = existing_file_ids
     knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
 
-    # If there were any errors, include them in the response
+    # Prepare response with appropriate warnings
+    warnings = {}
     if result.errors:
         error_details = [f"{err.file_id}: {err.error}" for err in result.errors]
+        warnings["message"] = "Some files failed to process"
+        warnings["errors"] = error_details
+    
+    if skipped_file_ids:
+        skipped_details = [f"{file_id}: File already exists in collection" for file_id in skipped_file_ids]
+        if warnings:
+            warnings["message"] = "Some files failed to process and some were skipped"
+            warnings["skipped"] = skipped_details
+        else:
+            warnings["message"] = "Some files were skipped (already exist in collection)"
+            warnings["skipped"] = skipped_details
+
+    if warnings:
         return KnowledgeFilesResponse(
             **knowledge.model_dump(),
             files=Files.get_file_metadatas_by_ids(existing_file_ids),
-            warnings={
-                "message": "Some files failed to process",
-                "errors": error_details,
-            },
+            warnings=warnings,
         )
 
     return KnowledgeFilesResponse(
@@ -1337,6 +1350,30 @@ async def process_transcription_completion(
         )
         
         # Save document to vector database with timestamp information
+        # Check for duplicates before saving
+        log.info(f"Checking for existing document with file_id: {file_id} in collection {knowledge_id}")
+        existing_docs = VECTOR_DB_CLIENT.query(
+            collection_name=knowledge_id,
+            filter={"file_id": file_id},
+        )
+
+        if existing_docs is not None and existing_docs.ids[0]:
+            log.info(f"Document with file_id {file_id} already exists in collection {knowledge_id}, skipping file")
+            # Skip this file but continue
+            return
+
+        # Fallback: Check by filename for files added before file_id metadata was consistent
+        log.info(f"Checking for existing document with filename: {filename} in collection {knowledge_id}")
+        existing_docs_by_name = VECTOR_DB_CLIENT.query(
+            collection_name=knowledge_id,
+            filter={"name": filename},
+        )
+
+        if existing_docs_by_name is not None and existing_docs_by_name.ids[0]:
+            log.info(f"Document with filename {filename} already exists in collection {knowledge_id}, skipping file")
+            # Skip this file but continue
+            return
+
         save_docs_to_vector_db(
             request=request,
             docs=[doc],
@@ -1649,6 +1686,36 @@ async def add_google_drive_folder_to_knowledge(
                             }
                         ),
                     )
+
+                    # Check for duplicates BEFORE starting expensive transcription
+                    log.info(f"Checking for existing document with file_id: {storage_file_id} in collection {id}")
+                    existing_docs = VECTOR_DB_CLIENT.query(
+                        collection_name=id,
+                        filter={"file_id": storage_file_id},
+                    )
+
+                    if existing_docs is not None and existing_docs.ids[0]:
+                        log.info(f"Document with file_id {storage_file_id} already exists in collection {id}, skipping file {filename}")
+                        try:
+                            await emit_progress_update(user.id, session_id, progress_file_id, "completed", 100, f"Skipped {filename} (already exists)")
+                        except Exception as progress_error:
+                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
+                        continue
+
+                    # Fallback: Check by filename for files added before file_id metadata was consistent
+                    log.info(f"Checking for existing document with filename: {filename} in collection {id}")
+                    existing_docs_by_name = VECTOR_DB_CLIENT.query(
+                        collection_name=id,
+                        filter={"name": filename},
+                    )
+
+                    if existing_docs_by_name is not None and existing_docs_by_name.ids[0]:
+                        log.info(f"Document with filename {filename} already exists in collection {id}, skipping file")
+                        try:
+                            await emit_progress_update(user.id, session_id, progress_file_id, "completed", 100, f"Skipped {filename} (already exists)")
+                        except Exception as progress_error:
+                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
+                        continue
 
                     # Check if file needs transcription
                     if mime_type and mime_type.startswith(("video/", "audio/")):
