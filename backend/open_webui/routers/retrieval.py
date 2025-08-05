@@ -1733,6 +1733,16 @@ def reset_upload_dir(user=Depends(get_admin_user)) -> bool:
     return True
 
 
+@router.post("/cleanup/uploads")
+def cleanup_uploads_folder(user=Depends(get_admin_user)) -> dict:
+    """
+    Clean up uploads folder when it exceeds RAG_FILE_MAX_SIZE * 2.
+    Only runs when GCS is enabled since we want to keep files in GCS but manage local storage.
+    """
+    from open_webui.utils.upload_cleanup import cleanup_uploads_folder as cleanup_func
+    return cleanup_func()
+
+
 if ENV == "dev":
 
     @router.get("/ef/{text}")

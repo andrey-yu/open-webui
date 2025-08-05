@@ -1488,6 +1488,11 @@ async def add_google_drive_file_to_knowledge(
         )
 
     try:
+        # Clean up uploads folder before downloading from Google Drive
+        from open_webui.utils.upload_cleanup import cleanup_uploads_folder
+        cleanup_result = cleanup_uploads_folder()
+        log.info(f"Uploads cleanup before Google Drive download: {cleanup_result}")
+        
         # Import progress tracking functions
         from open_webui.routers.progress import update_progress, mark_session_complete, mark_session_error
         
@@ -1590,6 +1595,11 @@ async def add_google_drive_folder_to_knowledge(
         )
 
     try:
+        # Clean up uploads folder before downloading from Google Drive folder
+        from open_webui.utils.upload_cleanup import cleanup_uploads_folder
+        cleanup_result = cleanup_uploads_folder()
+        log.info(f"Uploads cleanup before Google Drive folder download: {cleanup_result}")
+        
         # Import progress tracking functions
         from open_webui.socket.main import emit_session_start, emit_progress_update, emit_session_complete
         # Ensure Files model is available

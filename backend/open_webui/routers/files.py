@@ -488,6 +488,11 @@ async def get_file_content_by_id(
         or has_access_to_file(id, "read", user)
     ):
         try:
+            # Clean up uploads folder before downloading from GCS for citations
+            from open_webui.utils.upload_cleanup import cleanup_uploads_folder
+            cleanup_result = cleanup_uploads_folder()
+            log.info(f"Uploads cleanup before GCS download for citations: {cleanup_result}")
+            
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
 
@@ -563,6 +568,11 @@ async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user)):
         or has_access_to_file(id, "read", user)
     ):
         try:
+            # Clean up uploads folder before downloading from GCS for citations
+            from open_webui.utils.upload_cleanup import cleanup_uploads_folder
+            cleanup_result = cleanup_uploads_folder()
+            log.info(f"Uploads cleanup before GCS download for citations: {cleanup_result}")
+            
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
 
@@ -604,6 +614,11 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
         or user.role == "admin"
         or has_access_to_file(id, "read", user)
     ):
+        # Clean up uploads folder before downloading from GCS for citations
+        from open_webui.utils.upload_cleanup import cleanup_uploads_folder
+        cleanup_result = cleanup_uploads_folder()
+        log.info(f"Uploads cleanup before GCS download for citations: {cleanup_result}")
+        
         file_path = file.path
 
         # Handle Unicode filenames

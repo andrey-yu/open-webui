@@ -19,6 +19,7 @@
 
 	import { reindexKnowledgeFiles } from '$lib/apis/knowledge';
 	import { deleteAllFiles } from '$lib/apis/files';
+	import { cleanupUploadsFolder } from '$lib/apis/retrieval';
 
 	import ResetUploadDirConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import ResetVectorDBConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
@@ -37,6 +38,7 @@
 	let showResetConfirm = false;
 	let showResetUploadDirConfirm = false;
 	let showReindexConfirm = false;
+	let showCleanupUploadsConfirm = false;
 
 	let embeddingEngine = '';
 	let embeddingModel = '';
@@ -285,6 +287,24 @@
 
 		if (res) {
 			toast.success($i18n.t('Success'));
+		}
+	}}
+/>
+
+<ResetUploadDirConfirmDialog
+	bind:show={showCleanupUploadsConfirm}
+	on:confirm={async () => {
+		const res = await cleanupUploadsFolder(localStorage.token).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res) {
+			if (res.enabled) {
+				toast.success($i18n.t('Uploads folder cleaned up successfully'));
+			} else {
+				toast.info($i18n.t('GCS not enabled, cleanup skipped'));
+			}
 		}
 	}}
 />
@@ -1218,6 +1238,20 @@
 								}}
 							>
 								{$i18n.t('Reset')}
+							</button>
+						</div>
+					</div>
+
+					<div class="  mb-2.5 flex w-full justify-between">
+						<div class=" self-center text-xs font-medium">{$i18n.t('Cleanup Uploads Folder')}</div>
+						<div class="flex items-center relative">
+							<button
+								class="text-xs"
+								on:click={() => {
+									showCleanupUploadsConfirm = true;
+								}}
+							>
+								{$i18n.t('Cleanup')}
 							</button>
 						</div>
 					</div>
