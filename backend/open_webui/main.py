@@ -1533,12 +1533,25 @@ async def list_tasks_by_chat_id_endpoint(
 @app.get("/api/config")
 async def get_app_config(request: Request):
     user = None
-    if "token" in request.cookies:
+    
+    # Check for token in Authorization header first
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.replace("Bearer ", "")
+        try:
+            data = decode_token(token)
+            if data is not None and "id" in data:
+                user = Users.get_user_by_id(data["id"])
+        except Exception as e:
+            log.debug(f"Invalid token in Authorization header: {e}")
+    
+    # If no user found from Authorization header, check cookies
+    if user is None and "token" in request.cookies:
         token = request.cookies.get("token")
         try:
             data = decode_token(token)
         except Exception as e:
-            log.debug(e)
+            log.debug(f"Invalid token in cookies: {e}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",

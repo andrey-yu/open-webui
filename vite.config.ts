@@ -1,5 +1,7 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
+import fs from 'fs';
+import path from 'path';
 
 import { viteStaticCopy } from 'vite-plugin-static-copy';
 
@@ -28,5 +30,11 @@ export default defineConfig({
 	},
 	esbuild: {
 		pure: process.env.ENV === 'dev' ? [] : ['console.log', 'console.debug']
+	},
+	server: {
+		https: process.env.VITE_HTTPS === 'true' ? {
+			key: fs.readFileSync(path.join(process.cwd(), '.vite-certs', 'key.pem')),
+			cert: fs.readFileSync(path.join(process.cwd(), '.vite-certs', 'cert.pem'))
+		} : false
 	}
 });

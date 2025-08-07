@@ -46,6 +46,10 @@ MANIFEST
 *.manifest
 *.spec
 
+# Vite HTTPS certificates
+.vite-certs/
+
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

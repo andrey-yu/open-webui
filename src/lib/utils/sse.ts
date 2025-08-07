@@ -43,7 +43,7 @@ export class ProgressTracker {
         try {
             // Use the same base URL logic as the rest of the application
             const isDev = import.meta.env.DEV;
-            const baseUrl = isDev ? `http://${window.location.hostname}:8083` : window.location.origin;
+            const baseUrl = isDev ? `https://${window.location.hostname}:8083` : window.location.origin;
             const url = `${baseUrl}/api/v1/progress/${this.sessionId}`;
             
             // For SSE, we need to include the auth token in the URL since EventSource doesn't support custom headers
