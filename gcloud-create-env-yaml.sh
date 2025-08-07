@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Create a YAML file from .env.production
+# Create a YAML file from .env
+echo "Creating gcloud-env.yaml from $ENV_FILE"
 echo "# Cloud Run Environment Variables" > gcloud-env.yaml
-grep -v '^#' .env | grep '=' | while IFS= read -r line; do
+grep -v '^#' $ENV_FILE | grep '=' | while IFS= read -r line; do
   # Extract key and value
   key=$(echo "$line" | cut -d '=' -f 1)
   value=$(echo "$line" | cut -d '=' -f 2-)
@@ -21,4 +22,4 @@ grep -v '^#' .env | grep '=' | while IFS= read -r line; do
   fi
 done
 
-echo "Created gcloud-env.yaml from .env" 
+echo "Created gcloud-env.yaml from $ENV_FILE" 

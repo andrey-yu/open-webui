@@ -1,0 +1,84 @@
+# CRITICAL: Exclude massive directories that should never be uploaded
+node_modules/
+.svelte-kit/
+
+# Large lock files (keep package-lock.json for Docker build)
+yarn.lock
+uv.lock
+
+# Git and version control
+.git/
+.gitignore
+.gitattributes
+
+# Include .gitignore patterns (this is the most reliable way)
+#!include:.gitignore
+
+# Additional exclusions for Cloud Build
+# Deployment scripts (not needed for build)
+deploy-cloud-run.sh
+deploy-cloud-run-dev.sh
+compare-deployments.sh
+gcloud-create-env-yaml.sh
+run.sh
+run-compose.sh
+run-ollama-docker.sh
+update_ollama_models.sh
+confirm_remove.sh
+contribution_stats.py
+hatch_build.py
+
+# Docker and container files
+docker-compose*.yaml
+Dockerfile.*
+!Dockerfile
+
+# Kubernetes and deployment configs
+kubernetes/
+helm/
+
+# Large files and media
+demo.gif
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
+*.webm
+
+# Large font files
+#backend/open_webui/static/fonts/*.ttf
+#backend/open_webui/static/fonts/*.woff2
+#static/assets/fonts/*.ttf
+#static/assets/fonts/*.woff2
+
+# Database files
+*.db
+backend/data/*.db
+backend/data
+
+# Documentation (except essential)
+docs/
+*.md
+!README.md
+!CHANGELOG.md
+
+# Configuration files not needed for build
+.prettierrc
+.prettierignore
+.eslintrc.cjs
+.eslintignore
+.npmrc
+#tsconfig.json
+#tailwind.config.js
+#postcss.config.js
+#i18next-parser.config.ts
+cypress.config.ts
+
+# GitHub workflows and CI/CD
+.github/
+
+# License and legal files
+LICENSE*
+CONTRIBUTOR_LICENSE_AGREEMENT
+CODE_OF_CONDUCT.md

@@ -21,7 +21,7 @@ ARG UID=0
 ARG GID=0
 
 ######## WebUI frontend ########
-FROM --platform=$BUILDPLATFORM node:22-alpine3.20 AS build
+FROM --platform=linux/amd64 node:22-alpine3.20 AS build
 ARG BUILD_HASH
 
 WORKDIR /app
@@ -34,7 +34,10 @@ RUN npm ci --force
 
 COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
-RUN npm run build
+# Ensure SvelteKit is properly configured for static build
+RUN ls -la
+# Increase Node.js heap memory limit to prevent out of memory errors
+RUN NODE_OPTIONS="--max-old-space-size=4096" npm run build
 
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base

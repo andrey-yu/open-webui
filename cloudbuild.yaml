@@ -1,0 +1,33 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--platform'
+      - 'linux/amd64'
+      - '--build-arg'
+      - 'BUILD_HASH=${_BUILD_HASH}'
+      - '--build-arg'
+      - 'USE_CUDA=false'
+      - '--build-arg'
+      - 'USE_OLLAMA=false'
+      - '--build-arg'
+      - 'USE_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2'
+      - '--build-arg'
+      - 'BUILDPLATFORM=linux/amd64'
+      - '-t'
+      - '${_IMAGE_NAME}'
+      - '.'
+
+  # Push the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_IMAGE_NAME}'
+
+substitutions:
+  _BUILD_HASH: 'dev-build'
+  _IMAGE_NAME: 'gcr.io/$PROJECT_ID/open-webui:dev'
+
+options:
+  logging: CLOUD_LOGGING_ONLY 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =============================================================================
-# Open WebUI Cloud Run Deployment Script
+# Open WebUI Cloud Run Dev Deployment Script (Build from Source using Cloud Build)
 # =============================================================================
 
 set -e  # Exit on any error
@@ -15,16 +15,11 @@ NC='\033[0m' # No Color
 
 export PROJECT_ID="owui-467900"
 
-export STABLE_VERSION="v0.6.18"
-#export STABLE_VERSION="main"
-
 # Configuration
 PROJECT_ID=${PROJECT_ID:-"your-gcp-project-id"}
-SERVICE_NAME=${SERVICE_NAME:-"open-webui"}
+SERVICE_NAME=${SERVICE_NAME:-"open-webui-dev"}
 REGION=${REGION:-"us-central1"}
-ORIGINAL_IMAGE_NAME="ghcr.io/open-webui/open-webui:$STABLE_VERSION"
-REMOTE_REPO_NAME="open-webui-remote"
-REMOTE_REPO_LOCATION="us-central1"
+REPO_NAME="open-webui-dev"
 IMAGE_NAME=""
 
 # Function to print colored output
@@ -53,43 +48,38 @@ check_prerequisites() {
         exit 1
     fi
     
-    if ! command -v docker &> /dev/null; then
-        print_error "Docker is not installed. Please install it first."
-        exit 1
-    fi
-    
     print_success "Prerequisites check passed"
 }
 
-# Function to check if .env.prod file exists
+# Function to check if .env.dev file exists
 check_env_file() {
-    if [ ! -f ".env.prod" ]; then
-        print_error ".env.prod file not found!"
-        print_status "Please copy env.cloud-run.example to .env.prod and configure your values:"
-        echo "cp env.cloud-run.example .env.prod"
-        echo "nano .env.prod  # or your preferred editor"
+    if [ ! -f ".env.dev" ]; then
+        print_error ".env.dev file not found!"
+        print_status "Please copy env.cloud-run.example to .env.dev and configure your values:"
+        echo "cp env.cloud-run.example .env.dev"
+        echo "nano .env.dev  # or your preferred editor"
         exit 1
     fi
     
     # Check for required environment variables
-    source .env.prod
+    source .env.dev
     
     if [ -z "$DATABASE_URL" ]; then
-        print_error "DATABASE_URL is not set in .env.prod file"
+        print_error "DATABASE_URL is not set in .env.dev file"
         exit 1
     fi
     
     if [ -z "$OPENAI_API_KEY" ]; then
-        print_error "OPENAI_API_KEY is not set in .env.prod file"
+        print_error "OPENAI_API_KEY is not set in .env.dev file"
         exit 1
     fi
     
     if [ -z "$WEBUI_SECRET_KEY" ]; then
-        print_error "WEBUI_SECRET_KEY is not set in .env.prod file"
+        print_error "WEBUI_SECRET_KEY is not set in .env.dev file"
         exit 1
     fi
     
-    print_success "Environment file .env.prod validation passed"
+    print_success "Environment file validation passed"
 }
 
 # Function to authenticate with Google Cloud
@@ -114,50 +104,72 @@ authenticate_gcloud() {
     print_success "Google Cloud authentication completed"
 }
 
-# Function to setup remote repository for GitHub Container Registry
-setup_remote_repository() {
-    print_status "Setting up remote repository for GitHub Container Registry..."
+# Function to setup Artifact Registry repository
+setup_artifact_registry() {
+    print_status "Setting up Artifact Registry repository..."
     
-    # Check if remote repository already exists
-    if gcloud artifacts repositories describe $REMOTE_REPO_NAME --location=$REMOTE_REPO_LOCATION &>/dev/null; then
-        print_status "Remote repository '$REMOTE_REPO_NAME' already exists"
+    # Check if repository already exists
+    if gcloud artifacts repositories describe $REPO_NAME --location=$REGION &>/dev/null; then
+        print_status "Repository '$REPO_NAME' already exists"
     else
-        print_status "Creating remote repository '$REMOTE_REPO_NAME'..."
-        gcloud artifacts repositories create $REMOTE_REPO_NAME \
+        print_status "Creating repository '$REPO_NAME'..."
+        gcloud artifacts repositories create $REPO_NAME \
             --repository-format=docker \
-            --location=$REMOTE_REPO_LOCATION \
-            --mode=remote-repository \
-            --remote-docker-repo=https://ghcr.io \
-            --description="Remote repository for Open WebUI from GitHub Container Registry"
+            --location=$REGION \
+            --description="Open WebUI Dev Repository"
         
-        print_success "Remote repository created successfully"
+        print_success "Repository created successfully"
     fi
     
-    # Set the image name to use the remote repository
-    # For remote repositories, we need to use the full image path from the upstream registry
-    IMAGE_NAME="$REMOTE_REPO_LOCATION-docker.pkg.dev/$PROJECT_ID/$REMOTE_REPO_NAME/open-webui/open-webui:$STABLE_VERSION"
+    # Configure Docker to authenticate to Artifact Registry
+    print_status "Configuring Docker authentication..."
+    gcloud auth configure-docker $REGION-docker.pkg.dev
+    
+    # Set the image name
+    IMAGE_NAME="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/open-webui:dev"
     
     print_status "Using image: $IMAGE_NAME"
+}
+
+# Function to build and push Docker image using Google Cloud Build
+build_and_push_image() {
+    print_status "Building Docker image from source using Google Cloud Build..."
+    
+    # Generate build timestamp
+    BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    
+    # Build the image using Google Cloud Build with configuration file and live logging
+    gcloud beta builds submit \
+        --config cloudbuild.yaml \
+        --substitutions=_BUILD_HASH=dev-$BUILD_TIMESTAMP,_IMAGE_NAME=$IMAGE_NAME \
+        .
+    
+    print_success "Docker image built and pushed successfully using Google Cloud Build"
 }
 
 # Function to deploy to Cloud Run
 deploy_to_cloud_run() {
     print_status "Deploying to Cloud Run..."
 
-    export ENV_FILE=".env.prod"
+    export ENV_FILE=".env.dev"
     ./gcloud-create-env-yaml.sh
+
+    # if image name is not set, set it to the default
+    if [ -z "$IMAGE_NAME" ]; then
+        IMAGE_NAME="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/open-webui:dev"
+    fi
     
     # Update CORS_ALLOW_ORIGIN with the actual service URL for better security
     # Get the expected service URL
-    EXPECTED_SERVICE_URL="https://$SERVICE_NAME-$REGION-$PROJECT_ID.a.run.app"
+    #EXPECTED_SERVICE_URL="https://$SERVICE_NAME-$REGION-$PROJECT_ID.a.run.app"
     
     # Update the gcloud-env.yaml file to use the correct CORS origin
-    if [ -f "gcloud-env.yaml" ]; then
+    #if [ -f "gcloud-env.yaml" ]; then
         # Replace CORS_ALLOW_ORIGIN with the actual service URL
-        sed -i.bak "s|CORS_ALLOW_ORIGIN: \".*\"|CORS_ALLOW_ORIGIN: \"$EXPECTED_SERVICE_URL\"|g" gcloud-env.yaml
-        rm -f gcloud-env.yaml.bak
-        print_status "Updated CORS_ALLOW_ORIGIN to: $EXPECTED_SERVICE_URL"
-    fi
+        #sed -i.bak "s|CORS_ALLOW_ORIGIN: \".*\"|CORS_ALLOW_ORIGIN: \"$EXPECTED_SERVICE_URL\"|g" gcloud-env.yaml
+        #rm -f gcloud-env.yaml.bak
+        #print_status "Updated CORS_ALLOW_ORIGIN to: $EXPECTED_SERVICE_URL"
+    #fi
     
     # Build and deploy using gcloud run deploy
     gcloud run deploy $SERVICE_NAME \
@@ -184,11 +196,11 @@ get_service_url() {
     SERVICE_URL=$(gcloud run services describe $SERVICE_NAME --region=$REGION --format="value(status.url)")
     
     if [ -n "$SERVICE_URL" ]; then
-        print_success "Your Open WebUI is now available at:"
+        print_success "Your Open WebUI Dev is now available at:"
         echo -e "${GREEN}$SERVICE_URL${NC}"
         echo ""
         print_status "You can now:"
-        echo "1. Visit the URL to access Open WebUI"
+        echo "1. Visit the URL to access Open WebUI Dev"
         echo "2. Register your first admin account"
         echo "3. Start chatting with OpenAI models"
     else
@@ -207,21 +219,22 @@ show_status() {
 # Main deployment flow
 main() {
     echo "=============================================================================="
-    echo "Open WebUI Cloud Run Deployment"
+    echo "Open WebUI Cloud Run Dev Deployment (Build from Source)"
     echo "=============================================================================="
     echo ""
     
     check_prerequisites
     check_env_file
     authenticate_gcloud
-    setup_remote_repository
+    setup_artifact_registry
+    build_and_push_image
     deploy_to_cloud_run
     get_service_url
     show_status
     
     echo ""
     echo "=============================================================================="
-    print_success "Deployment completed successfully!"
+    print_success "Dev deployment completed successfully!"
     echo "=============================================================================="
 }
 
@@ -229,6 +242,15 @@ main() {
 case "${1:-deploy}" in
     "deploy")
         main
+        ;;
+    "deploy-only")
+        deploy_to_cloud_run
+        ;;
+    "build")
+        check_prerequisites
+        authenticate_gcloud
+        setup_artifact_registry
+        build_and_push_image
         ;;
     "status")
         show_status
@@ -240,15 +262,19 @@ case "${1:-deploy}" in
         echo "Usage: $0 [command]"
         echo ""
         echo "Commands:"
-        echo "  deploy  - Deploy Open WebUI to Cloud Run (default)"
+        echo "  deploy  - Deploy Open WebUI Dev to Cloud Run (default)"
+        echo "  deploy-only  - Deploy Open WebUI Dev to Cloud Run (without building)"
+        echo "  build   - Build and push Docker image only"
         echo "  status  - Show deployment status"
         echo "  url     - Get the service URL"
         echo "  help    - Show this help message"
         echo ""
         echo "Environment variables:"
         echo "  PROJECT_ID   - Google Cloud Project ID (default: your-gcp-project-id)"
-        echo "  SERVICE_NAME - Cloud Run service name (default: open-webui)"
+        echo "  SERVICE_NAME - Cloud Run service name (default: open-webui-dev)"
         echo "  REGION       - Google Cloud region (default: us-central1)"
+        echo ""
+        echo "This script builds the Docker image from source using Google Cloud Build and deploys to a -dev service."
         ;;
     *)
         print_error "Unknown command: $1"
