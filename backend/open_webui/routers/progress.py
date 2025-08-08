@@ -7,141 +7,214 @@ from fastapi import APIRouter, Request, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
 from open_webui.utils.auth import get_verified_user
 from open_webui.models.users import Users
+from open_webui.models.knowledge import Knowledges
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["progress"])
 
-# In-memory storage for progress tracking
-# In production, this should be moved to Redis or database
-progress_store: Dict[str, Dict] = {}
-
 def update_progress(session_id: str, progress_data: dict):
-    """Update progress for a session"""
-    progress_store[session_id] = {
-        **progress_data,
-        "last_updated": time.time(),
-        "active": True
-    }
-    log.info(f"Progress updated for session {session_id}: {progress_data}")
+    """Update progress for a session in the database"""
+    try:
+        # Extract knowledge_id from session_id (assuming format: knowledge_id_session_uuid)
+        # For now, we'll store progress in a special knowledge entry with id = session_id
+        knowledge_id = session_id
+        
+        # Get or create knowledge entry for this session
+        knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+        
+        if not knowledge:
+            log.warning(f"Knowledge base {knowledge_id} not found for progress tracking")
+            return
+        
+        # Update the meta field with progress information
+        meta = knowledge.meta or {}
+        meta["processing_progress"] = {
+            "session_id": session_id,
+            "status": progress_data.get("status", "processing"),
+            "total_files": progress_data.get("total_files", 1),
+            "processed_files": 1 if progress_data.get("status") == "completed" else 0,
+            "current_file": progress_data.get("file_list", [""])[0] if progress_data.get("file_list") else "",
+            "file_list": progress_data.get("file_list", []),
+            "progress": progress_data.get("progress", 0),
+            "message": progress_data.get("message", ""),
+            "last_updated": int(time.time()),
+            "error": progress_data.get("error")
+        }
+        
+        # Update the knowledge entry
+        Knowledges.update_knowledge_by_id(
+            id=knowledge_id,
+            form_data=type('obj', (object,), {
+                'name': knowledge.name,
+                'description': knowledge.description,
+                'data': knowledge.data,
+                'access_control': knowledge.access_control
+            })(),
+            overwrite=True
+        )
+        
+        # Also update the meta field specifically
+        Knowledges.update_knowledge_meta_by_id(knowledge_id, meta)
+        
+        log.info(f"Progress updated for session {session_id}: {progress_data}")
+        
+    except Exception as e:
+        log.error(f"Error updating progress for session {session_id}: {e}")
 
 def get_progress(session_id: str) -> Optional[Dict]:
-    """Get current progress for a session"""
-    return progress_store.get(session_id)
+    """Get current progress for a session from the database"""
+    try:
+        knowledge_id = session_id
+        knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+        
+        if not knowledge or not knowledge.meta:
+            return None
+        
+        progress_data = knowledge.meta.get("processing_progress")
+        if not progress_data:
+            return None
+        
+        # Check if progress is stale (older than 5 minutes)
+        last_updated = progress_data.get("last_updated", 0)
+        if time.time() - last_updated > 300:  # 5 minutes
+            log.info(f"Progress for session {session_id} is stale, removing")
+            # Remove stale progress
+            meta = knowledge.meta.copy()
+            meta.pop("processing_progress", None)
+            Knowledges.update_knowledge_meta_by_id(knowledge_id, meta)
+            return None
+        
+        return progress_data
+        
+    except Exception as e:
+        log.error(f"Error getting progress for session {session_id}: {e}")
+        return None
 
 def mark_session_complete(session_id: str):
-    """Mark a session as complete"""
-    if session_id in progress_store:
-        progress_store[session_id]["active"] = False
-        progress_store[session_id]["status"] = "completed"
-        log.info(f"Session {session_id} marked as complete")
+    """Mark a session as complete in the database"""
+    try:
+        knowledge_id = session_id
+        knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+        
+        if not knowledge:
+            log.warning(f"Knowledge base {knowledge_id} not found for marking session complete")
+            return
+        
+        meta = knowledge.meta or {}
+        if "processing_progress" in meta:
+            # Force completion state
+            pp = meta["processing_progress"]
+            pp["status"] = "completed"
+            pp["progress"] = 100
+            pp["processed_files"] = pp.get("total_files", 1)
+            pp["last_updated"] = int(time.time())
+            pp["message"] = "Processing completed successfully"
+            
+            Knowledges.update_knowledge_meta_by_id(knowledge_id, meta)
+            log.info(f"Session {session_id} marked as complete")
+        
+    except Exception as e:
+        log.error(f"Error marking session {session_id} as complete: {e}")
 
 def mark_session_error(session_id: str, error: str):
-    """Mark a session as error"""
-    if session_id in progress_store:
-        progress_store[session_id]["active"] = False
-        progress_store[session_id]["status"] = "error"
-        progress_store[session_id]["error"] = error
-        log.info(f"Session {session_id} marked as error: {error}")
+    """Mark a session as error in the database"""
+    try:
+        knowledge_id = session_id
+        knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+        
+        if not knowledge:
+            log.warning(f"Knowledge base {knowledge_id} not found for marking session error")
+            return
+        
+        meta = knowledge.meta or {}
+        if "processing_progress" in meta:
+            meta["processing_progress"]["status"] = "error"
+            meta["processing_progress"]["error"] = error
+            meta["processing_progress"]["last_updated"] = int(time.time())
+            meta["processing_progress"]["message"] = f"Error: {error}"
+            
+            Knowledges.update_knowledge_meta_by_id(knowledge_id, meta)
+            log.info(f"Session {session_id} marked as error: {error}")
+        
+    except Exception as e:
+        log.error(f"Error marking session {session_id} as error: {e}")
+
+def update_file_progress(session_id: str, file_progress: dict):
+    """Update progress for a specific file in the session"""
+    try:
+        knowledge_id = session_id
+        knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+        
+        if not knowledge:
+            log.warning(f"Knowledge base {knowledge_id} not found for file progress update")
+            return
+        
+        meta = knowledge.meta or {}
+        if "processing_progress" not in meta:
+            meta["processing_progress"] = {
+                "session_id": session_id,
+                "status": "processing",
+                "total_files": file_progress.get("total_files", 1),
+                "processed_files": file_progress.get("processed_files", 0),
+                "current_file": file_progress.get("current_file", ""),
+                "file_list": file_progress.get("file_list", []),
+                "progress": 0,
+                "message": "",
+                "last_updated": int(time.time()),
+                "error": None
+            }
+        
+        # Update file-specific progress
+        progress = meta["processing_progress"]
+        # Determine session-level status, avoiding premature 'completed'
+        incoming_status = file_progress.get("status", progress.get("status", "processing"))
+        if incoming_status == "completed":
+            # Only set completed when all files are done; otherwise keep processing
+            total = progress.get("total_files") or file_progress.get("total_files") or 1
+            processed = progress.get("processed_files", 0)
+            # If this completion will not finish the whole batch, keep session status as processing
+            session_status = "completed" if (processed + 1) >= total else "processing"
+        else:
+            session_status = incoming_status
+
+        progress.update({
+            "status": session_status,
+            "progress": file_progress.get("progress", progress.get("progress", 0)),
+            "message": file_progress.get("message", progress.get("message", "")),
+            "last_updated": int(time.time()),
+            "error": file_progress.get("error")
+        })
+        
+        # Update additional fields if provided
+        if "total_files" in file_progress:
+            progress["total_files"] = file_progress["total_files"]
+        if "processed_files" in file_progress:
+            progress["processed_files"] = file_progress["processed_files"]
+        if "current_file" in file_progress:
+            progress["current_file"] = file_progress["current_file"]
+        if "file_list" in file_progress:
+            progress["file_list"] = file_progress["file_list"]
+        
+        # Update processed files count if completed
+        if file_progress.get("status") == "completed":
+            current_processed = progress.get("processed_files", 0)
+            total = progress.get("total_files", 1)
+            progress["processed_files"] = min(current_processed + 1, total)
+        
+        Knowledges.update_knowledge_meta_by_id(knowledge_id, meta)
+        log.info(f"File progress updated for session {session_id}: {file_progress}")
+        
+    except Exception as e:
+        log.error(f"Error updating file progress for session {session_id}: {e}")
 
 @router.get("/{session_id}")
 async def progress_stream(session_id: str, request: Request):
-    log.info(f"SSE request received for session: {session_id}")
-    
-    # Handle token authentication from URL parameter for SSE
-    token = request.query_params.get("token")
-    if token:
-        log.info(f"Authenticating with token for session: {session_id}")
-        # Verify token manually for SSE
-        try:
-            from open_webui.utils.auth import decode_token
-            user_data = decode_token(token)
-            if not user_data:
-                log.warning(f"Invalid token for session: {session_id}")
-                raise HTTPException(status_code=401, detail="Invalid token")
-            log.info(f"Token validated for user: {user_data.get('id', 'unknown')}")
-            # Token is valid, continue with SSE logic
-        except Exception as e:
-            log.error(f"Token validation error for session {session_id}: {e}")
-            raise HTTPException(status_code=401, detail="Invalid token")
-    else:
-        log.info(f"No token provided, skipping auth for SSE session: {session_id}")
-        # For SSE, we'll skip authentication if no token is provided
-        # This allows the connection to establish immediately
-        pass
-    
-    """Stream progress updates for a session using Server-Sent Events"""
+    """Legacy SSE endpoint - now returns a message to use polling instead"""
+    log.info(f"SSE request received for session: {session_id} - redirecting to polling")
     
     async def event_generator():
-        try:
-            log.info(f"Starting event generator for session: {session_id}")
-            # Send immediate response to establish connection
-            connecting_data = f"data: {json.dumps({'status': 'connecting', 'message': 'Connecting to progress stream...'})}\n\n"
-            log.info(f"Sending connecting message for session {session_id}: {connecting_data.strip()}")
-            yield connecting_data
-            log.info(f"Sent connecting message for session {session_id}")
-            
-            # Wait for session to be created if it doesn't exist yet
-            wait_count = 0
-            while session_id not in progress_store and wait_count < 30:  # Wait up to 30 seconds
-                log.info(f"Session {session_id} not found, waiting... (attempt {wait_count + 1}/30)")
-                yield f"data: {json.dumps({'status': 'waiting', 'message': 'Waiting for session to be created...'})}\n\n"
-                await asyncio.sleep(1)
-                wait_count += 1
-            
-            # Send current progress immediately when client connects
-            if session_id in progress_store:
-                current_progress = progress_store[session_id]
-                initial_data = f"data: {json.dumps(current_progress)}\n\n"
-                log.info(f"Sending initial SSE data for session {session_id}: {initial_data.strip()}")
-                yield initial_data
-                log.info(f"Sent initial progress for session {session_id}")
-                
-                # If session is already completed or has error, stop immediately
-                if current_progress.get("status") in ["completed", "error"] or not current_progress.get("active", False):
-                    log.info(f"Session {session_id} already finished, stopping stream immediately")
-                    return
-            else:
-                # Session not found after waiting
-                yield f"data: {json.dumps({'status': 'not_found', 'message': 'Session not found after waiting'})}\n\n"
-                log.warning(f"Session {session_id} not found after waiting")
-                return
-            
-            # Continue monitoring for updates only if session is still active
-            last_progress = None
-            while True:
-                if session_id in progress_store:
-                    progress = progress_store[session_id]
-                    
-                    # Only send if progress has changed
-                    if last_progress is None or progress.get("progress") != last_progress.get("progress") or progress.get("status") != last_progress.get("status") or progress.get("message") != last_progress.get("message"):
-                        sse_data = f"data: {json.dumps(progress)}\n\n"
-                        log.info(f"Sending SSE data for session {session_id}: {sse_data.strip()}")
-                        yield sse_data
-                        last_progress = progress.copy()
-                        log.info(f"Sent progress update for session {session_id}: {progress.get('status')} - {progress.get('progress')}% - {progress.get('message')}")
-                    
-                    # Check if session is still active
-                    if not progress.get("active", False):
-                        log.info(f"Session {session_id} completed, stopping stream")
-                        break
-                        
-                    if progress.get("status") in ["completed", "error"]:
-                        log.info(f"Session {session_id} finished with status: {progress.get('status')}")
-                        break
-                else:
-                    # Session was removed
-                    yield f"data: {json.dumps({'status': 'not_found', 'message': 'Session was removed'})}\n\n"
-                    log.warning(f"Session {session_id} was removed during streaming")
-                    break
-                    
-                await asyncio.sleep(1)
-                
-        except asyncio.CancelledError:
-            log.info(f"SSE stream cancelled for session {session_id}")
-        except Exception as e:
-            log.error(f"Error in SSE stream for session {session_id}: {e}")
-            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
+        yield f"data: {json.dumps({'status': 'deprecated', 'message': 'SSE deprecated, use polling endpoint /progress/{session_id}/status instead'})}\n\n"
     
     return StreamingResponse(
         event_generator(),
@@ -158,11 +231,35 @@ async def progress_stream(session_id: str, request: Request):
 
 @router.get("/{session_id}/status")
 async def get_session_status(session_id: str, user=Depends(get_verified_user)):
-    """Get current status of a session (for polling fallback)"""
-    if session_id not in progress_store:
-        raise HTTPException(status_code=404, detail="Session not found")
+    """Get current status of a session (for polling)"""
+    progress_data = get_progress(session_id)
     
-    return progress_store[session_id]
+    if not progress_data:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    
+    return progress_data
+
+@router.delete("/{session_id}")
+async def clear_session_progress(session_id: str, user=Depends(get_verified_user)):
+    """Clear progress data for a session"""
+    try:
+        knowledge_id = session_id
+        knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+        
+        if not knowledge:
+            raise HTTPException(status_code=404, detail="Knowledge base not found")
+        
+        # Remove progress data from meta
+        meta = knowledge.meta or {}
+        meta.pop("processing_progress", None)
+        
+        Knowledges.update_knowledge_meta_by_id(knowledge_id, meta)
+        
+        return {"message": "Progress data cleared successfully"}
+        
+    except Exception as e:
+        log.error(f"Error clearing progress for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear progress data")
 
 # Export functions for use in other modules
-__all__ = ["update_progress", "get_progress", "mark_session_complete", "mark_session_error"] 
+__all__ = ["update_progress", "get_progress", "mark_session_complete", "mark_session_error", "update_file_progress"] 

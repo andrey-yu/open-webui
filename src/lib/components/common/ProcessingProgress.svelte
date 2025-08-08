@@ -11,10 +11,17 @@
 	import Document from '$lib/components/icons/Document.svelte';
 	import Mic from '$lib/components/icons/Mic.svelte';
 
-	export let sessionId: string;
-	
-	let session: ProcessingSession | undefined;
-	let unsubscribe: () => void;
+    export let sessionId: string;
+    
+    let session: ProcessingSession | undefined;
+    let unsubscribe: () => void;
+
+    // Derived UI subset: latest completed, current, and next two pending
+    let currentFile: any = undefined;
+    let latestCompleted: any = null;
+    let pendingToShow: any[] = [];
+    let totalShown = 0;
+    let remaining = 0;
 	
 	onMount(() => {
 		console.log('ProcessingProgress: Mounting for session:', sessionId);
@@ -28,12 +35,30 @@
 		if (unsubscribe) unsubscribe();
 	});
 	
-	$: if (session) {
+    $: if (session) {
 		const elapsed = Date.now() - session.startTime;
 		const avgTimePerFile = session.processedFiles > 0 ? elapsed / session.processedFiles : 0;
 		const remainingFiles = session.totalFiles - session.processedFiles;
 		const estimatedTimeRemaining = avgTimePerFile * remainingFiles;
 	}
+
+    // Compute the limited list to display
+    $: {
+        if (session && session.files && session.files.length > 0) {
+            currentFile = session.files.find(f => f.status === 'processing' || f.status === 'transcribing');
+            const completedList = session.files.filter(f => f.status === 'completed');
+            latestCompleted = completedList.length > 0 ? completedList[completedList.length - 1] : null;
+            const pendingCandidates = session.files.filter(f => f.status === 'pending');
+            pendingToShow = pendingCandidates.slice(0, 2);
+        } else {
+            currentFile = undefined;
+            latestCompleted = null;
+            pendingToShow = [];
+        }
+
+        totalShown = (latestCompleted ? 1 : 0) + (currentFile ? 1 : 0) + (pendingToShow ? pendingToShow.length : 0);
+        remaining = Math.max((session ? session.totalFiles : 0) - totalShown, 0);
+    }
 	
 		const getStatusIcon = (status: string) => {
 		switch (status) {
@@ -150,43 +175,75 @@
 				</div>
 			{/if}
 			
-			<!-- File List -->
-			<div class="max-h-48 overflow-y-auto">
-				{#each session.files as file}
-					{@const StatusIcon = getStatusIcon(file.status)}
-					
-					<div class="flex items-center space-x-2 py-1">
-						<StatusIcon size="xs" class={getStatusColor(file.status)} />
-						<div class="flex-1 min-w-0">
-							<div class="text-xs text-gray-900 dark:text-gray-100 truncate">
-								{file.filename}
-							</div>
-							<div class="text-xs text-gray-500 dark:text-gray-400">
-								{getStatusText(file.status)}
-								{#if file.message}
-									- {file.message}
-								{/if}
-								{#if file.progress > 0 && file.progress < 100}
-									<span class="text-blue-500">({file.progress}%)</span>
-								{/if}
-							</div>
-							{#if file.progress > 0 && file.progress < 100}
-								<div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1 mt-1">
-									<div
-										class="bg-blue-500 h-1 rounded-full transition-all duration-300"
-										style="width: {file.progress}%"
-									></div>
-								</div>
-							{/if}
-						</div>
-						{#if file.status === 'processing' || file.status === 'transcribing'}
-							<div class="w-4 h-4">
-								<Spinner size="xs" />
-							</div>
-						{/if}
-					</div>
-				{/each}
-			</div>
+            <!-- File List (limited: 1 completed, 1 current, 2 pending) -->
+            <div class="max-h-48 overflow-y-auto">
+                {#if session.files && session.files.length > 0}
+                    {#key session.currentProcessingFileIndex}
+                        {#if latestCompleted}
+                            {@const CompletedIcon = getStatusIcon(latestCompleted.status)}
+                            <div class="flex items-center space-x-2 py-1">
+                                <CompletedIcon size="xs" class={getStatusColor(latestCompleted.status)} />
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-xs text-gray-900 dark:text-gray-100 truncate">
+                                        {latestCompleted.filename}
+                                    </div>
+                                    <div class="text-xs text-green-600 dark:text-green-400">
+                                        {getStatusText(latestCompleted.status)}
+                                    </div>
+                                </div>
+                            </div>
+                        {/if}
+
+                        {#if currentFile}
+                            {@const CurrentIcon = getStatusIcon(currentFile.status)}
+                            <div class="flex items-center space-x-2 py-1">
+                                <CurrentIcon size="xs" class={getStatusColor(currentFile.status)} />
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-xs text-gray-900 dark:text-gray-100 truncate">
+                                        {currentFile.filename}
+                                    </div>
+                                    <div class="text-xs text-blue-600 dark:text-blue-400">
+                                        {getStatusText(currentFile.status)}
+                                        {#if currentFile.message}
+                                            - {currentFile.message}
+                                        {/if}
+                                        {#if currentFile.progress > 0 && currentFile.progress < 100}
+                                            <span class="text-blue-500">({currentFile.progress}%)</span>
+                                        {/if}
+                                    </div>
+                                    {#if currentFile.progress > 0 && currentFile.progress < 100}
+                                        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1 mt-1">
+                                            <div class="bg-blue-500 h-1 rounded-full transition-all duration-300" style="width: {currentFile.progress}%"></div>
+                                        </div>
+                                    {/if}
+                                </div>
+                                <div class="w-4 h-4">
+                                    <Spinner size="xs" />
+                                </div>
+                            </div>
+                        {/if}
+
+                        {#each pendingToShow as file}
+                            {@const PendingIcon = getStatusIcon(file.status)}
+                            <div class="flex items-center space-x-2 py-1">
+                                <PendingIcon size="xs" class={getStatusColor(file.status)} />
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-xs text-gray-900 dark:text-gray-100 truncate">
+                                        {file.filename}
+                                    </div>
+                                    <div class="text-xs text-gray-600 dark:text-gray-400">
+                                        {getStatusText(file.status)}
+                                    </div>
+                                </div>
+                            </div>
+                        {/each}
+
+                        {#if remaining > 0}
+                            <div class="text-[11px] text-gray-500 dark:text-gray-400 py-1 pl-6">+{remaining} more</div>
+                        {/if}
+                    {/key}
+                {/if}
+            </div>
 			
 			<!-- Error Summary -->
 			{#if session.files.some(f => f.status === 'error')}

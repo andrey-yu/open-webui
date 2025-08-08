@@ -50,6 +50,10 @@ async def get_knowledge(user=Depends(get_verified_user)):
     else:
         knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "read")
 
+    log.info(f"get_knowledge: Retrieved {len(knowledge_bases)} knowledge bases")
+    for kb in knowledge_bases:
+        log.info(f"get_knowledge: Knowledge base {kb.id} meta: {kb.meta}")
+
     # Get files for each knowledge base
     knowledge_with_files = []
     for knowledge_base in knowledge_bases:
@@ -256,13 +260,268 @@ class KnowledgeFilesResponse(KnowledgeResponse):
 
 class KnowledgeFilesResponseWithSession(KnowledgeFilesResponse):
     session_id: Optional[str] = None
+# Background worker for Google Drive folder processing
+async def process_google_drive_folder_complete(
+    request: Request,
+    knowledge_id: str,
+    session_id: str,
+    user_id: str,
+    files: list[dict],
+    oauth_token: str,
+):
+    """Process a Google Drive folder end-to-end in the background."""
+    from open_webui.routers.progress import update_file_progress, mark_session_complete, mark_session_error
+    from open_webui.models.files import Files, FileForm
+    try:
+        # Minimal user object for downstream calls that only require user.id
+        class MockUser:
+            def __init__(self, uid: str):
+                self.id = uid
+
+        mock_user = MockUser(user_id)
+
+        successful_files: list[str] = []
+        failed_files: list[dict] = []
+
+        batch_size = 5
+        for i in range(0, len(files), batch_size):
+            batch = files[i:i + batch_size]
+            for file_info in batch:
+                import uuid
+                storage_file_id = str(uuid.uuid4())
+                filename = file_info.get("name", "unknown")
+
+                try:
+                    update_file_progress(session_id, {
+                        "status": "processing",
+                        "progress": 10,
+                        "message": f"Downloading {filename}",
+                        "current_file": filename
+                    })
+
+                    file_content, filename, mime_type = google_drive_service.download_file(
+                        file_info["id"], oauth_token
+                    )
+
+                    update_file_progress(session_id, {
+                        "status": "processing",
+                        "progress": 30,
+                        "message": f"Uploading {filename}",
+                        "current_file": filename
+                    })
+
+                    from io import BytesIO
+                    file_obj = BytesIO(file_content)
+                    file_obj.name = filename
+
+                    tags = {
+                        "OpenWebUI-User-Id": user_id,
+                        "OpenWebUI-File-Id": storage_file_id,
+                        "OpenWebUI-Source": "google-drive",
+                    }
+                    contents, file_path = Storage.upload_file(file_obj, f"{storage_file_id}_{filename}", tags)
+
+                    update_file_progress(session_id, {
+                        "status": "processing",
+                        "progress": 50,
+                        "message": f"Creating file record for {filename}",
+                        "current_file": filename
+                    })
+
+                    file_item = Files.insert_new_file(
+                        user_id,
+                        FileForm(
+                            **{
+                                "id": storage_file_id,
+                                "filename": filename,
+                                "path": file_path,
+                                "meta": {
+                                    "name": filename,
+                                    "content_type": mime_type,
+                                    "size": len(contents),
+                                    "data": {"source": "google-drive", "file_id": file_info["id"]},
+                                },
+                            }
+                        ),
+                    )
+
+                    # Dedup checks
+                    existing_docs = VECTOR_DB_CLIENT.query(
+                        collection_name=knowledge_id,
+                        filter={"file_id": storage_file_id},
+                    )
+                    if existing_docs is not None and existing_docs.ids[0]:
+                        update_file_progress(session_id, {
+                            "status": "completed",
+                            "progress": 100,
+                            "message": f"Skipped {filename} (already exists)",
+                            "current_file": filename
+                        })
+                        successful_files.append(storage_file_id)
+                        continue
+
+                    existing_docs_by_name = VECTOR_DB_CLIENT.query(
+                        collection_name=knowledge_id,
+                        filter={"name": filename},
+                    )
+                    if existing_docs_by_name is not None and existing_docs_by_name.ids[0]:
+                        update_file_progress(session_id, {
+                            "status": "completed",
+                            "progress": 100,
+                            "message": f"Skipped {filename} (already exists)",
+                            "current_file": filename
+                        })
+                        successful_files.append(storage_file_id)
+                        continue
+
+                    # Transcribe or process
+                    if mime_type and mime_type.startswith(("video/", "audio/")):
+                        update_file_progress(session_id, {
+                            "status": "transcribing",
+                            "progress": 70,
+                            "message": f"Transcribing {filename}",
+                            "current_file": filename
+                        })
+
+                        actual_path = Storage.get_file(file_path)
+                        # Run sync transcription in thread to allow async progress loop
+                        import threading, time
+                        transcription_result = None
+                        transcription_error = None
+                        def run_transcription():
+                            nonlocal transcription_result, transcription_error
+                            try:
+                                transcription_result = transcribe(request, actual_path, {"source": "google-drive"})
+                            except Exception as e:
+                                transcription_error = e
+                        t = threading.Thread(target=run_transcription)
+                        t.start()
+
+                        start_time = time.time()
+                        while t.is_alive():
+                            elapsed = time.time() - start_time
+                            est = min(75 + int((elapsed / 30) * 10), 95)
+                            update_file_progress(session_id, {
+                                "status": "transcribing",
+                                "progress": est,
+                                "message": f"Transcribing {filename}... ({int(elapsed)}s elapsed)",
+                                "current_file": filename
+                            })
+                            import asyncio
+                            await asyncio.sleep(2)
+
+                        if transcription_error:
+                            raise ValueError(f"Failed to transcribe audio/video file: {transcription_error}")
+
+                        result = transcription_result or {}
+                        update_file_progress(session_id, {
+                            "status": "transcribing",
+                            "progress": 78,
+                            "message": f"Transcription completed for {filename}",
+                            "current_file": filename
+                        })
+
+                        update_file_progress(session_id, {
+                            "status": "processing",
+                            "progress": 90,
+                            "message": f"Processing {filename}",
+                            "current_file": filename
+                        })
+
+                        transcription_text = result.get("text", "").strip()
+                        if not transcription_text:
+                            raise ValueError("Transcription resulted in empty content")
+
+                        segments = result.get("segments", [])
+                        from langchain_core.documents import Document
+                        from open_webui.routers.retrieval import save_docs_to_vector_db
+                        doc = Document(
+                            page_content=transcription_text,
+                            metadata={
+                                "name": filename,
+                                "file_id": storage_file_id,
+                                "source": filename,
+                                "segments": segments,
+                                "content_type": mime_type,
+                                "transcription_source": "google_drive",
+                            },
+                        )
+                        save_docs_to_vector_db(
+                            request=request,
+                            docs=[doc],
+                            collection_name=knowledge_id,
+                            metadata={
+                                "file_id": storage_file_id,
+                                "name": filename,
+                                "content_type": mime_type,
+                                "transcription_source": "google_drive",
+                            },
+                            add=True,
+                            user=mock_user,
+                        )
+
+                        file_rec = Files.get_file_by_id(storage_file_id)
+                        if file_rec:
+                            data = file_rec.data or {}
+                            data["content"] = transcription_text
+                            Files.update_file_data_by_id(storage_file_id, data)
+                    else:
+                        update_file_progress(session_id, {
+                            "status": "processing",
+                            "progress": 70,
+                            "message": f"Processing {filename}",
+                            "current_file": filename
+                        })
+                        process_file(
+                            request,
+                            ProcessFileForm(file_id=storage_file_id, collection_name=knowledge_id),
+                            user=mock_user,
+                        )
+
+                    update_file_progress(session_id, {
+                        "status": "completed",
+                        "progress": 100,
+                        "message": f"Completed {filename}",
+                        "current_file": filename
+                    })
+
+                    successful_files.append(storage_file_id)
+                except Exception as e:
+                    update_file_progress(session_id, {
+                        "status": "error",
+                        "progress": 0,
+                        "message": None,
+                        "error": str(e),
+                        "current_file": filename
+                    })
+                    failed_files.append({"name": filename, "error": str(e)})
+
+        # Complete session and update knowledge
+        mark_session_complete(session_id)
+        knowledge = Knowledges.get_knowledge_by_id(id=knowledge_id)
+        data = knowledge.data or {}
+        file_ids = data.get("file_ids", [])
+        for fid in successful_files:
+            if fid not in file_ids:
+                file_ids.append(fid)
+        data["file_ids"] = file_ids
+        Knowledges.update_knowledge_data_by_id(id=knowledge_id, data=data)
+    except Exception as e:
+        log.error(f"Error in process_google_drive_folder_complete: {e}")
+        try:
+            mark_session_error(session_id, str(e))
+        except Exception:
+            pass
 
 
 @router.get("/{id}", response_model=Optional[KnowledgeFilesResponse])
 async def get_knowledge_by_id(id: str, user=Depends(get_verified_user)):
     knowledge = Knowledges.get_knowledge_by_id(id=id)
-
+    
+    log.info(f"get_knowledge_by_id: Retrieved knowledge for ID {id}")
     if knowledge:
+        log.info(f"get_knowledge_by_id: Knowledge meta field: {knowledge.meta}")
+        log.info(f"get_knowledge_by_id: Knowledge data field: {knowledge.data}")
 
         if (
             user.role == "admin"
@@ -273,10 +532,12 @@ async def get_knowledge_by_id(id: str, user=Depends(get_verified_user)):
             file_ids = knowledge.data.get("file_ids", []) if knowledge.data else []
             files = Files.get_file_metadatas_by_ids(file_ids)
 
-            return KnowledgeFilesResponse(
+            response = KnowledgeFilesResponse(
                 **knowledge.model_dump(),
                 files=files,
             )
+            log.info(f"get_knowledge_by_id: Returning response with meta: {response.meta}")
+            return response
     else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -915,7 +1176,7 @@ async def process_google_drive_file_complete(
     oauth_token: str
 ):
     """Process a Google Drive file completely in the background"""
-    from open_webui.routers.progress import update_progress, mark_session_complete, mark_session_error
+    from open_webui.routers.progress import update_file_progress, mark_session_complete, mark_session_error
     from open_webui.routers.retrieval import process_file, ProcessFileForm
     from open_webui.models.users import Users
     from open_webui.models.files import Files, FileForm
@@ -932,39 +1193,27 @@ async def process_google_drive_file_complete(
         mock_user = MockUser(user_id)
         
         # Update progress to show starting
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "processing",
             "progress": 0,
-            "message": "Starting file processing",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "Starting file processing"
         })
         
         # Download file from Google Drive
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "processing",
             "progress": 20,
-            "message": "Downloading file from Google Drive",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "Downloading file from Google Drive"
         })
         
         file_content, filename, mime_type = google_drive_service.download_file(
             form_data_file_id, oauth_token
         )
 
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "processing",
             "progress": 40,
-            "message": "Uploading file to storage",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "Uploading file to storage"
         })
 
         # Create a temporary file-like object
@@ -984,14 +1233,10 @@ async def process_google_drive_file_complete(
 
         contents, file_path = Storage.upload_file(file_obj, f"{storage_file_id}_{filename}", tags)
 
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "processing",
             "progress": 60,
-            "message": "Creating file record",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "Creating file record"
         })
 
         # Create file record
@@ -1045,14 +1290,10 @@ async def process_google_drive_file_complete(
                     log.info(f"Processing PDF file {file.id} ({filename})")
                 
                 # Update progress to show processing starting
-                update_progress(session_id, {
-                    "session_id": session_id,
-                    "file_id": progress_file_id,
+                update_file_progress(session_id, {
                     "status": "processing",
                     "progress": 80,
-                    "message": "Processing file content",
-                    "total_files": 1,
-                    "file_list": [form_data_file_id]
+                    "message": "Processing file content"
                 })
                 
                 # Process the file
@@ -1072,41 +1313,29 @@ async def process_google_drive_file_complete(
                     log.warning(f"Failed to clean up local files for {file.id}: {cleanup_error}")
                 
                 # Update progress to show completion
-                update_progress(session_id, {
-                    "session_id": session_id,
-                    "file_id": progress_file_id,
+                update_file_progress(session_id, {
                     "status": "completed",
                     "progress": 100,
-                    "message": "File processed successfully",
-                    "total_files": 1,
-                    "file_list": [form_data_file_id]
+                    "message": "File processed successfully"
                 })
                 
             else:
                 # For unsupported video/image files, skip processing
                 log.info(f"File type {mime_type} is not supported for processing")
                 
-                update_progress(session_id, {
-                    "session_id": session_id,
-                    "file_id": progress_file_id,
+                update_file_progress(session_id, {
                     "status": "completed",
                     "progress": 100,
-                    "message": "File type not supported for processing",
-                    "total_files": 1,
-                    "file_list": [form_data_file_id]
+                    "message": "File type not supported for processing"
                 })
         else:
             # If no content type, try to process anyway
             log.info(f"File type {mime_type} is not provided, but trying to process anyway")
             
-            update_progress(session_id, {
-                "session_id": session_id,
-                "file_id": progress_file_id,
+            update_file_progress(session_id, {
                 "status": "processing",
                 "progress": 80,
-                "message": "Processing file content",
-                "total_files": 1,
-                "file_list": [form_data_file_id]
+                "message": "Processing file content"
             })
             
             # Process the file
@@ -1125,14 +1354,10 @@ async def process_google_drive_file_complete(
             except Exception as cleanup_error:
                 log.warning(f"Failed to clean up local files for {file.id}: {cleanup_error}")
             
-            update_progress(session_id, {
-                "session_id": session_id,
-                "file_id": progress_file_id,
+            update_file_progress(session_id, {
                 "status": "completed",
                 "progress": 100,
-                "message": "File processed successfully",
-                "total_files": 1,
-                "file_list": [form_data_file_id]
+                "message": "File processed successfully"
             })
 
         # Add file to knowledge base
@@ -1165,7 +1390,7 @@ async def process_regular_file_completion(
     form_data_file_id: str
 ):
     """Process a regular file (non-video/audio) in the background"""
-    from open_webui.routers.progress import update_progress, mark_session_complete, mark_session_error
+    from open_webui.routers.progress import update_file_progress, mark_session_complete, mark_session_error
     from open_webui.routers.retrieval import process_file, ProcessFileForm
     from open_webui.models.users import Users
     
@@ -1178,14 +1403,10 @@ async def process_regular_file_completion(
         mock_user = MockUser(user_id)
         
         # Update progress to show processing starting
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "processing",
             "progress": 80,
-            "message": "Processing file content",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "Processing file content"
         })
         
         # Process the file
@@ -1196,14 +1417,10 @@ async def process_regular_file_completion(
         )
         
         # Update progress to show completion
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "completed",
             "progress": 100,
-            "message": "File processed successfully",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "File processed successfully"
         })
         
         mark_session_complete(session_id)
@@ -1229,20 +1446,16 @@ async def process_transcription_completion(
     """
     Background task to handle transcription completion and file processing
     """
-    from open_webui.routers.progress import update_progress, mark_session_complete, mark_session_error
+    from open_webui.routers.progress import update_file_progress, mark_session_complete, mark_session_error
     
     try:
         log.info(f"Starting transcription for file {file_id} with mime_type {mime_type}")
         
         # Update progress to show transcription starting
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "transcribing",
             "progress": 80,
-            "message": "Transcribing audio/video file",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "Transcribing audio/video file"
         })
         
         log.info(f"File path for transcription: {file_path}")
@@ -1283,7 +1496,9 @@ async def process_transcription_completion(
                 "file_list": [form_data_file_id]
             })
             
-            time.sleep(2)  # Update every 2 seconds
+            # Use non-blocking sleep to avoid blocking the event loop
+            import asyncio
+            await asyncio.sleep(2)  # Update every 2 seconds
         
         # Get the transcription result
         if transcription_future and "error" in transcription_future:
@@ -1409,14 +1624,10 @@ async def process_transcription_completion(
             log.warning(f"Failed to clean up local files for {file_id}: {cleanup_error}")
         
         # Update progress to show completion
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "completed",
             "progress": 100,
-            "message": "File processed successfully",
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "message": "File processed successfully"
         })
 
         
@@ -1440,15 +1651,11 @@ async def process_transcription_completion(
         log.error(f"Error in background transcription processing for file {file_id}: {str(e)}")
         
         # Update progress to show error
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": progress_file_id,
+        update_file_progress(session_id, {
             "status": "error",
             "progress": 0,
             "message": None,
-            "error": str(e),
-            "total_files": 1,
-            "file_list": [form_data_file_id]
+            "error": str(e)
         })
         
         mark_session_error(session_id, str(e))
@@ -1494,7 +1701,7 @@ async def add_google_drive_file_to_knowledge(
         log.info(f"Uploads cleanup before Google Drive download: {cleanup_result}")
         
         # Import progress tracking functions
-        from open_webui.routers.progress import update_progress, mark_session_complete, mark_session_error
+        from open_webui.routers.progress import update_file_progress, mark_session_complete, mark_session_error
         
         # Start progress tracking session for single file
         import uuid
@@ -1502,14 +1709,10 @@ async def add_google_drive_file_to_knowledge(
         file_id = str(uuid.uuid4())  # Generate file ID for progress tracking
         
         # Initialize progress tracking for the session
-        update_progress(session_id, {
-            "session_id": session_id,
-            "file_id": file_id,
+        update_file_progress(session_id, {
             "status": "processing",
             "progress": 0,
-            "message": "Starting file processing",
-            "total_files": 1,
-            "file_list": [form_data.file_id]
+            "message": "Starting file processing"
         })
         
         # Add comprehensive background task for all file processing
@@ -1550,15 +1753,11 @@ async def add_google_drive_file_to_knowledge(
     except Exception as e:
         # Handle exceptions
         if 'session_id' in locals() and 'file_id' in locals():
-            update_progress(session_id, {
-                "session_id": session_id,
-                "file_id": file_id,
+            update_file_progress(session_id, {
                 "status": "error",
                 "progress": 0,
                 "message": None,
-                "error": str(e),
-                "total_files": 1,
-                "file_list": [form_data.file_id]
+                "error": str(e)
             })
             mark_session_error(session_id, str(e))
         
@@ -1567,7 +1766,7 @@ async def add_google_drive_file_to_knowledge(
         raise ValueError(f"Failed to add Google Drive file: {str(e)}")
 
 
-@router.post("/{id}/google-drive/folder", response_model=Optional[KnowledgeFilesResponse])
+@router.post("/{id}/google-drive/folder", response_model=Optional[KnowledgeFilesResponseWithSession])
 async def add_google_drive_folder_to_knowledge(
     request: Request,
     id: str,
@@ -1599,13 +1798,8 @@ async def add_google_drive_folder_to_knowledge(
         from open_webui.utils.upload_cleanup import cleanup_uploads_folder
         cleanup_result = cleanup_uploads_folder()
         log.info(f"Uploads cleanup before Google Drive folder download: {cleanup_result}")
-        
-        # Import progress tracking functions
-        from open_webui.socket.main import emit_session_start, emit_progress_update, emit_session_complete
-        # Ensure Files model is available
-        from open_webui.models.files import Files
-        
-        # List all files in the folder
+
+        # List all files in the folder (quick call to size progress)
         files = google_drive_service.list_folder_files(
             form_data.folder_id, form_data.oauth_token, form_data.recursive
         )
@@ -1618,345 +1812,52 @@ async def add_google_drive_folder_to_knowledge(
 
         log.info(f"Found {len(files)} files in Google Drive folder")
 
-        # Start progress tracking session
-        import uuid
-        session_id = str(uuid.uuid4())
+        # Start progress tracking session - use knowledge base ID as session ID
+        from open_webui.routers.progress import update_file_progress, update_progress
+        session_id = id  # Use the knowledge base ID as the session ID
         file_list = [file_info.get("name", "unknown") for file_info in files]
-        try:
-            await emit_session_start(user.id, session_id, len(files), file_list)
-        except Exception as session_error:
-            log.warning(f"Failed to start session {session_id}: {session_error}")
 
-        # Process files in batches to avoid overwhelming the system
-        batch_size = 5
-        successful_files = []
-        failed_files = []
+        # Initialize progress tracking for the session, including the full file list once
+        update_progress(session_id, {
+            "status": "processing",
+            "progress": 0,
+            "message": f"Starting to process {len(files)} files",
+            "total_files": len(files),
+            "processed_files": 0,
+            "file_list": file_list,
+        })
 
-        for i in range(0, len(files), batch_size):
-            batch = files[i:i + batch_size]
-            
-            for file_info in batch:
-                progress_file_id = str(uuid.uuid4())  # ID for progress tracking
-                filename = file_info.get("name", "unknown")
-                
-                try:
-                    # Update progress - starting to process
-                    try:
-                        await emit_progress_update(user.id, session_id, progress_file_id, "processing", 10, f"Downloading {filename}")
-                    except Exception as progress_error:
-                        log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-                    
-                    # Download file from Google Drive
-                    file_content, filename, mime_type = google_drive_service.download_file(
-                        file_info["id"], form_data.oauth_token
-                    )
+        # Process the folder in a background thread similar to single-file flow
+        def run_in_thread():
+            import asyncio
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(process_google_drive_folder_complete(
+                    request=request,
+                    knowledge_id=id,
+                    session_id=session_id,
+                    user_id=user.id,
+                    files=files,
+                    oauth_token=form_data.oauth_token
+                ))
+            finally:
+                loop.close()
 
-                    try:
-                        await emit_progress_update(user.id, session_id, progress_file_id, "processing", 30, f"Uploading {filename}")
-                    except Exception as progress_error:
-                        log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
+        import threading
+        thread = threading.Thread(target=run_in_thread)
+        thread.daemon = True
+        thread.start()
 
-                    # Create a temporary file-like object
-                    from io import BytesIO
-                    file_obj = BytesIO(file_content)
-                    file_obj.name = filename
-
-                    # Upload file using existing storage provider
-                    storage_file_id = str(uuid.uuid4())
-                    tags = {
-                        "OpenWebUI-User-Email": user.email,
-                        "OpenWebUI-User-Id": user.id,
-                        "OpenWebUI-User-Name": user.name,
-                        "OpenWebUI-File-Id": storage_file_id,
-                        "OpenWebUI-Source": "google-drive",
-                    }
-
-                    contents, file_path = Storage.upload_file(file_obj, f"{storage_file_id}_{filename}", tags)
-
-                    try:
-                        await emit_progress_update(user.id, session_id, progress_file_id, "processing", 50, f"Creating file record for {filename}")
-                    except Exception as progress_error:
-                        log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-
-                    # Create file record
-                    from open_webui.models.files import FileForm
-                    file_item = Files.insert_new_file(
-                        user.id,
-                        FileForm(
-                            **{
-                                "id": storage_file_id,
-                                "filename": filename,
-                                "path": file_path,
-                                "meta": {
-                                    "name": filename,
-                                    "content_type": mime_type,
-                                    "size": len(contents),
-                                    "data": {"source": "google-drive", "file_id": file_info["id"]},
-                                },
-                            }
-                        ),
-                    )
-
-                    # Check for duplicates BEFORE starting expensive transcription
-                    log.info(f"Checking for existing document with file_id: {storage_file_id} in collection {id}")
-                    existing_docs = VECTOR_DB_CLIENT.query(
-                        collection_name=id,
-                        filter={"file_id": storage_file_id},
-                    )
-
-                    if existing_docs is not None and existing_docs.ids[0]:
-                        log.info(f"Document with file_id {storage_file_id} already exists in collection {id}, skipping file {filename}")
-                        try:
-                            await emit_progress_update(user.id, session_id, progress_file_id, "completed", 100, f"Skipped {filename} (already exists)")
-                        except Exception as progress_error:
-                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-                        continue
-
-                    # Fallback: Check by filename for files added before file_id metadata was consistent
-                    log.info(f"Checking for existing document with filename: {filename} in collection {id}")
-                    existing_docs_by_name = VECTOR_DB_CLIENT.query(
-                        collection_name=id,
-                        filter={"name": filename},
-                    )
-
-                    if existing_docs_by_name is not None and existing_docs_by_name.ids[0]:
-                        log.info(f"Document with filename {filename} already exists in collection {id}, skipping file")
-                        try:
-                            await emit_progress_update(user.id, session_id, progress_file_id, "completed", 100, f"Skipped {filename} (already exists)")
-                        except Exception as progress_error:
-                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-                        continue
-
-                    # Check if file needs transcription
-                    if mime_type and mime_type.startswith(("video/", "audio/")):
-                        log.info(f"Starting transcription for file {storage_file_id} ({filename}) with mime_type {mime_type}")
-                        try:
-                            await emit_progress_update(user.id, session_id, progress_file_id, "transcribing", 70, f"Transcribing {filename}")
-                        except Exception as progress_error:
-                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-                        
-                        # Transcribe the file
-                        file_path = Storage.get_file(file_path)
-                        log.info(f"File path for transcription: {file_path}")
-                        
-                        # Start transcription in a background thread to allow progress updates
-                        import threading
-                        import time
-                        
-                        transcription_result = None
-                        transcription_error = None
-                        
-                        def run_transcription():
-                            nonlocal transcription_result, transcription_error
-                            try:
-                                transcription_result = transcribe(request, file_path, {"source": "google-drive"})
-                            except Exception as e:
-                                transcription_error = e
-                        
-                        # Start transcription in a thread
-                        transcription_thread = threading.Thread(target=run_transcription)
-                        transcription_thread.start()
-                        
-                        # Send periodic progress updates during transcription
-                        start_time = time.time()
-                        while transcription_thread.is_alive():
-                            elapsed = time.time() - start_time
-                            # Estimate progress based on elapsed time (assuming 30 seconds for transcription)
-                            estimated_progress = min(75 + int((elapsed / 30) * 10), 95)
-                            
-                            try:
-                                await emit_progress_update(user.id, session_id, progress_file_id, "transcribing", estimated_progress, f"Transcribing {filename}... ({int(elapsed)}s elapsed)")
-                            except Exception as progress_error:
-                                log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-                            
-                            time.sleep(2)  # Update every 2 seconds
-                        
-                        # Check for transcription errors
-                        if transcription_error:
-                            log.error(f"Error transcribing file {storage_file_id}: {str(transcription_error)}")
-                            raise ValueError(f"Failed to transcribe audio/video file: {str(transcription_error)}")
-                        
-                        result = transcription_result
-                        log.info(f"Transcription completed for file {storage_file_id}")
-                        
-                        try:
-                            await emit_progress_update(user.id, session_id, progress_file_id, "transcribing", 78, f"Transcription completed for {filename}")
-                        except Exception as progress_error:
-                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-
-                        log.info(f"Starting processing for transcribed file {storage_file_id}")
-                        try:
-                            await emit_progress_update(user.id, session_id, progress_file_id, "processing", 90, f"Processing {filename}")
-                        except Exception as progress_error:
-                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-
-                        # Process file with transcription
-                        try:
-                            # Check if transcription result has content
-                            transcription_text = result.get("text", "").strip()
-                            if not transcription_text:
-                                raise ValueError("Transcription resulted in empty content")
-                            
-                            # Get timestamp segments if available
-                            segments = result.get("segments", [])
-                            
-                            # Create document with timestamp information
-                            from langchain_core.documents import Document
-                            from open_webui.routers.retrieval import save_docs_to_vector_db
-                            
-                            doc = Document(
-                                page_content=transcription_text,
-                                metadata={
-                                    "name": filename,
-                                    "file_id": storage_file_id,
-                                    "source": filename,
-                                    "segments": segments,  # Include timestamp segments
-                                    "content_type": mime_type,
-                                    "transcription_source": "google_drive"
-                                }
-                            )
-                            
-                            # Save document to vector database with timestamp information
-                            save_docs_to_vector_db(
-                                request=request,
-                                docs=[doc],
-                                collection_name=id,
-                                metadata={
-                                    "file_id": storage_file_id,
-                                    "name": filename,
-                                    "content_type": mime_type,
-                                    "transcription_source": "google_drive"
-                                },
-                                add=True,
-                                user=user
-                            )
-                            
-                            # Update the file's content field with the transcribed text
-                            from open_webui.models.files import Files
-                            file = Files.get_file_by_id(storage_file_id)
-                            if file:
-                                data = file.data or {}
-                                data["content"] = transcription_text
-                                Files.update_file_data_by_id(storage_file_id, data)
-                                log.info(f"Updated file content for {storage_file_id}")
-                            
-                            log.info(f"Processing completed for file {storage_file_id}")
-                            
-                            # Clean up local files after successful processing
-                            # Keep GCS files and DB entries, remove only local files
-                            try:
-                                from open_webui.storage.provider import LocalStorageProvider
-                                LocalStorageProvider.delete_file_and_related(file_path)
-                                log.info(f"Cleaned up local files for {storage_file_id} after successful processing")
-                            except Exception as cleanup_error:
-                                log.warning(f"Failed to clean up local files for {storage_file_id}: {cleanup_error}")
-                                
-                        except Exception as process_error:
-                            log.error(f"Error processing file {storage_file_id} with transcription: {str(process_error)}")
-                            raise ValueError(f"Failed to process transcribed content: {str(process_error)}")
-
-                    else:
-                        # Check if it's a PDF and provide helpful information
-                        if mime_type == "application/pdf":
-                            log.info(f"Processing PDF file {storage_file_id} ({filename})")
-                            # Check if PDF image extraction is enabled
-                            pdf_extract_images = getattr(request.app.state.config, "PDF_EXTRACT_IMAGES", False)
-                            content_extraction_engine = getattr(request.app.state.config, "CONTENT_EXTRACTION_ENGINE", "")
-                            
-                            if not pdf_extract_images and not content_extraction_engine:
-                                log.info(f"PDF image extraction is disabled and no content extraction engine is configured for file {filename}")
-                        
-                        try:
-                            await emit_progress_update(user.id, session_id, progress_file_id, "processing", 70, f"Processing {filename}")
-                        except Exception as progress_error:
-                            log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-                        
-                        # Process file normally
-                        try:
-                            process_file(
-                                request,
-                                ProcessFileForm(file_id=storage_file_id, collection_name=id),
-                                user=user,
-                            )
-                            
-                            # Clean up local files after successful processing
-                            # Keep GCS files and DB entries, remove only local files
-                            try:
-                                from open_webui.storage.provider import LocalStorageProvider
-                                LocalStorageProvider.delete_file_and_related(file_path)
-                                log.info(f"Cleaned up local files for {storage_file_id} after successful processing")
-                            except Exception as cleanup_error:
-                                log.warning(f"Failed to clean up local files for {storage_file_id}: {cleanup_error}")
-                                
-                        except Exception as process_error:
-                            log.error(f"Error processing file {storage_file_id}: {str(process_error)}")
-                            
-                            # Provide more specific error messages for PDF files
-                            if mime_type == "application/pdf":
-                                if "empty content" in str(process_error).lower():
-                                    raise ValueError("PDF file could not be processed. This may be because the PDF is image-based, password-protected, or uses an unsupported format. Try enabling PDF image extraction in settings or use a different content extraction engine.")
-                                else:
-                                    raise ValueError(f"Failed to process PDF file: {str(process_error)}")
-                            else:
-                                raise ValueError(f"Failed to process file content: {str(process_error)}")
-
-                    try:
-                        await emit_progress_update(user.id, session_id, progress_file_id, "completed", 100, f"Completed {filename}")
-                    except Exception as progress_error:
-                        log.warning(f"Failed to emit progress update for {filename}: {progress_error}")
-                    successful_files.append(storage_file_id)
-
-                except Exception as e:
-                    log.error(f"Error processing file {filename}: {e}")
-                    try:
-                        await emit_progress_update(user.id, session_id, progress_file_id, "error", 0, None, str(e))
-                    except Exception as progress_error:
-                        log.warning(f"Failed to emit progress update for file {filename}: {progress_error}")
-                    failed_files.append({
-                        "name": filename,
-                        "error": str(e)
-                    })
-
-        # Complete progress tracking session
-        try:
-            await emit_session_complete(user.id, session_id)
-        except Exception as session_error:
-            log.warning(f"Failed to complete session {session_id}: {session_error}")
-
-        # Add successful files to knowledge base
-        data = knowledge.data or {}
-        existing_file_ids = data.get("file_ids", [])
-        for file_id in successful_files:
-            if file_id not in existing_file_ids:
-                existing_file_ids.append(file_id)
-        data["file_ids"] = existing_file_ids
-        knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
-
-        # Prepare response
-        response = KnowledgeFilesResponse(
+        # Return immediately with session ID
+        return KnowledgeFilesResponseWithSession(
             **knowledge.model_dump(),
-            files=Files.get_file_metadatas_by_ids(existing_file_ids),
+            files=[],
+            session_id=session_id
         )
-
-        # Add warnings if there were failures
-        if failed_files:
-            response.warnings = {
-                "message": f"Successfully added {len(successful_files)} files. {len(failed_files)} files failed.",
-                "failed_files": failed_files,
-            }
-
-        return response
 
     except Exception as e:
         log.error(f"Error adding Google Drive folder to knowledge base: {e}", exc_info=True)
-        
-        # Try to complete session if it exists
-        if 'session_id' in locals():
-            try:
-                await emit_session_complete(user.id, session_id)
-            except Exception as session_error:
-                log.warning(f"Failed to complete session {session_id}: {session_error}")
-        
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to add Google Drive folder: {str(e)}",

@@ -257,6 +257,101 @@ function createProgressStore() {
 			});
 		},
 
+		// Update processed files count
+		updateProcessedFiles: (sessionId: string, processedFiles: number) => {
+			console.log('Progress store: Updating processed files count', { sessionId, processedFiles });
+			update(state => {
+				const session = state.sessions.get(sessionId);
+				if (!session) {
+					console.warn('Progress store: Session not found', sessionId);
+					return state;
+				}
+
+				const newSession = {
+					...session,
+					processedFiles
+				};
+
+				const newSessions = new Map(state.sessions);
+				newSessions.set(sessionId, newSession);
+
+				console.log('Progress store: Processed files count updated', { sessionId, processedFiles });
+
+				return {
+					...state,
+					sessions: newSessions
+				};
+			});
+		},
+
+		// Ensure session has placeholders for a given list of filenames
+		addPendingFiles: (sessionId: string, fileList: string[]) => {
+			console.log('Progress store: Ensuring pending files', { sessionId, fileList });
+			update(state => {
+				const session = state.sessions.get(sessionId);
+				if (!session) {
+					console.warn('Progress store: Session not found', sessionId);
+					return state;
+				}
+
+				const existingFilenames = new Set(session.files.map(f => f.filename));
+				const newFiles: FileProgress[] = [];
+				for (const name of fileList) {
+					if (!existingFilenames.has(name)) {
+						newFiles.push({
+							id: crypto.randomUUID(),
+							filename: name,
+							status: 'pending',
+							progress: 0
+						});
+					}
+				}
+
+				if (newFiles.length === 0) {
+					return state;
+				}
+
+				const newSession: ProcessingSession = {
+					...session,
+					files: [...session.files, ...newFiles]
+				};
+				const newSessions = new Map(state.sessions);
+				newSessions.set(sessionId, newSession);
+				return {
+					...state,
+					sessions: newSessions
+				};
+			});
+		},
+
+		// Update total files count
+		updateTotalFiles: (sessionId: string, totalFiles: number, currentFileName?: string) => {
+			console.log('Progress store: Updating total files count', { sessionId, totalFiles, currentFileName });
+			update(state => {
+				const session = state.sessions.get(sessionId);
+				if (!session) {
+					console.warn('Progress store: Session not found', sessionId);
+					return state;
+				}
+
+				const newSession = { ...session };
+				newSession.totalFiles = totalFiles;
+
+				// Optionally update the first file's name if we have a better current file
+				if (currentFileName && newSession.files.length === 1 && newSession.files[0].filename !== currentFileName) {
+					newSession.files = newSession.files.map((f, idx) => idx === 0 ? { ...f, filename: currentFileName } : f);
+				}
+
+				const newSessions = new Map(state.sessions);
+				newSessions.set(sessionId, newSession);
+
+				return {
+					...state,
+					sessions: newSessions
+				};
+			});
+		},
+
 		// Get current session
 		getCurrentSession: (state: ProgressState) => {
 			return state.activeSessionId ? state.sessions.get(state.activeSessionId) : null;

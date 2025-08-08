@@ -399,17 +399,17 @@ export const addGoogleDriveFileToKnowledge = async (
 
 	const result = await res.json();
 	
-	// Start SSE progress tracking if session_id is provided
+	// Start polling progress tracking if session_id is provided
 	if (result.session_id) {
-		console.log('Starting SSE progress tracking for session:', result.session_id);
-		import('../../utils/sse.js').then(({ startProgressTracking }) => {
-			console.log('SSE module loaded, starting tracker');
+		console.log('Starting polling progress tracking for session:', result.session_id);
+		import('../../utils/polling.js').then(({ startProgressTracking }) => {
+			console.log('Polling module loaded, starting tracker');
 			startProgressTracking(result.session_id);
 		}).catch(error => {
-			console.error('Failed to load SSE module:', error);
+			console.error('Failed to load polling module:', error);
 		});
 	} else {
-		console.log('No session_id in response, skipping SSE tracking');
+		console.log('No session_id in response, skipping polling tracking');
 	}
 	
 
@@ -424,7 +424,17 @@ export const addGoogleDriveFolderToKnowledge = async (
 	oauthToken: string,
 	recursive: boolean = true
 ) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/google-drive/folder`, {
+	console.log('addGoogleDriveFolderToKnowledge called with:', {
+		knowledgeId,
+		folderId,
+		oauthToken: oauthToken ? 'present' : 'missing',
+		recursive
+	});
+	
+	const url = `${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/google-drive/folder`;
+	console.log('Making request to:', url);
+	
+	const res = await fetch(url, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -437,10 +447,29 @@ export const addGoogleDriveFolderToKnowledge = async (
 		})
 	});
 
+	console.log('Response status:', res.status);
+	
 	if (!res.ok) {
 		const error = await res.json();
+		console.error('API error:', error);
 		throw error.detail || error;
 	}
 
-	return res.json();
+	const result = await res.json();
+	console.log('API response:', result);
+	
+	// Start polling progress tracking if session_id is provided
+	if (result.session_id) {
+		console.log('Starting polling progress tracking for folder session:', result.session_id);
+		import('../../utils/polling.js').then(({ startProgressTracking }) => {
+			console.log('Polling module loaded, starting tracker for folder');
+			startProgressTracking(result.session_id);
+		}).catch(error => {
+			console.error('Failed to load polling module for folder:', error);
+		});
+	} else {
+		console.log('No session_id in folder response, skipping polling tracking');
+	}
+
+	return result;
 };

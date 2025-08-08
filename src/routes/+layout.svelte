@@ -110,38 +110,20 @@
 			}
 		});
 
-		// Progress tracking events
-		_socket.on('processing-session-start', (data) => {
-			console.log('Processing session started:', data);
-			progressStore.startSession(data.session_id, data.total_files, data.file_list);
-		});
-
-		_socket.on('file-progress-update', (data) => {
-			console.log('File progress update:', data);
-			progressStore.updateFileProgress(data.session_id, data.file_id, {
-				status: data.status,
-				progress: data.progress,
-				message: data.message,
-				error: data.error
-			});
-		});
-
-		_socket.on('processing-session-complete', (data) => {
-			console.log('Processing session completed:', data);
-			// Keep the session visible for a few seconds before auto-removing
-			setTimeout(() => {
-				progressStore.completeSession(data.session_id);
-			}, 3000);
-		});
+		// Progress tracking events (now handled by polling)
+		// Socket events are deprecated in favor of polling
 
 		_socket.on('filename-update', (data) => {
 			console.log('Filename update:', data);
 			progressStore.updateFilename(data.session_id, data.file_id, data.filename);
 		});
 
-		// Debug: Log all socket events
+		// Debug: Log all socket events (except progress events which are now handled by polling)
 		_socket.onAny((eventName, ...args) => {
-			console.log('Socket event received:', eventName, args);
+			// Skip progress events as they're now handled by polling
+			if (!eventName.includes('progress') && !eventName.includes('session')) {
+				console.log('Socket event received:', eventName, args);
+			}
 		});
 	};
 

@@ -198,6 +198,24 @@ class KnowledgeTable:
             log.exception(e)
             return None
 
+    def update_knowledge_meta_by_id(
+        self, id: str, meta: dict
+    ) -> Optional[KnowledgeModel]:
+        try:
+            with get_db() as db:
+                knowledge = self.get_knowledge_by_id(id=id)
+                db.query(Knowledge).filter_by(id=id).update(
+                    {
+                        "meta": meta,
+                        "updated_at": int(time.time()),
+                    }
+                )
+                db.commit()
+                return self.get_knowledge_by_id(id=id)
+        except Exception as e:
+            log.exception(e)
+            return None
+
     def delete_knowledge_by_id(self, id: str) -> bool:
         try:
             with get_db() as db:

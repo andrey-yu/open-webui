@@ -40,6 +40,7 @@
 	} from '$lib/apis/knowledge';
 	import { blobToFile } from '$lib/utils';
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
+	import { checkAndResumeDatabaseSessions } from '$lib/utils/polling';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
@@ -238,18 +239,15 @@
 						progressStore.startSession(result.session_id, 1, [fileData.name || fileData.id]);
 					});
 					
-					// Start SSE tracking
-					console.log('Starting SSE tracking for real session:', result.session_id);
-					import('$lib/utils/sse.js').then(({ startProgressTracking }) => {
+					// Start polling tracking
+					console.log('Starting polling tracking for real session:', result.session_id);
+					import('$lib/utils/polling.js').then(({ startProgressTracking }) => {
 						startProgressTracking(result.session_id, () => {
 							// Refresh knowledge base data when session completes
 							loadKnowledgeData();
-						}).catch((error) => {
-							console.error('SSE connection failed:', error);
-							// Only show error for actual connection failures, not timeouts
-							if (error.message.includes('max retries')) {
-								toast.error($i18n.t('Failed to establish progress tracking connection. Progress updates may not be visible.'));
-							}
+						}, (error) => {
+							console.error('Polling failed:', error);
+							toast.error($i18n.t('Failed to track progress. Progress updates may not be visible.'));
 						});
 					});
 					
@@ -296,7 +294,32 @@
 				// Show initial progress message
 				toast.info($i18n.t('Processing Google Drive folder... This may take a while.'));
 				
+				// Start progress tracking immediately with the knowledge base ID as session ID
+				console.log('Starting progress tracking immediately for session:', id);
+				import('$lib/stores/progress.js').then(({ progressStore }) => {
+					progressStore.startSession(id, 1, [folderData.name || folderData.id]);
+				});
+				
+				// Start polling immediately
+				import('$lib/utils/polling.js').then(({ startProgressTracking }) => {
+					startProgressTracking(id, () => {
+						// Refresh knowledge base data when session completes
+						loadKnowledgeData();
+					}, (error) => {
+						console.error('Polling failed:', error);
+						toast.error($i18n.t('Failed to track progress. Progress updates may not be visible.'));
+					});
+				});
+				
 				// Add folder to knowledge base using server-side API
+				console.log('Calling addGoogleDriveFolderToKnowledge with:', {
+					token: localStorage.token ? 'present' : 'missing',
+					knowledgeId: id,
+					folderId: folderData.id,
+					oauthToken: oauthToken ? 'present' : 'missing',
+					recursive: true
+				});
+				
 				const result = await addGoogleDriveFolderToKnowledge(
 					localStorage.token,
 					id,
@@ -304,6 +327,8 @@
 					oauthToken,
 					true // recursive
 				);
+				
+				console.log('addGoogleDriveFolderToKnowledge result:', result);
 
 				if (result) {
 					// Refresh knowledge base data
@@ -313,7 +338,6 @@
 					if (result.warnings) {
 						toast.success(result.warnings.message);
 					}
-					// Progress will be shown via WebSocket events
 				}
 			} else if (folderData && folderData.type === 'file') {
 				// User selected a file instead of a folder, handle it as a single file
@@ -338,18 +362,15 @@
 						progressStore.startSession(result.session_id, 1, [folderData.name || folderData.id]);
 					});
 					
-					// Start SSE tracking
-					console.log('Starting SSE tracking for real session (folder flow):', result.session_id);
-					import('$lib/utils/sse.js').then(({ startProgressTracking }) => {
+					// Start polling tracking
+					console.log('Starting polling tracking for real session (folder flow):', result.session_id);
+					import('$lib/utils/polling.js').then(({ startProgressTracking }) => {
 						startProgressTracking(result.session_id, () => {
 							// Refresh knowledge base data when session completes
 							loadKnowledgeData();
-						}).catch((error) => {
-							console.error('SSE connection failed (folder flow):', error);
-							// Only show error for actual connection failures, not timeouts
-							if (error.message.includes('max retries')) {
-								toast.error($i18n.t('Failed to establish progress tracking connection. Progress updates may not be visible.'));
-							}
+						}, (error) => {
+							console.error('Polling failed (folder flow):', error);
+							toast.error($i18n.t('Failed to track progress. Progress updates may not be visible.'));
 						});
 					});
 					
@@ -363,13 +384,15 @@
 			console.error('Google Drive Folder Error:', error);
 			
 			// Provide more specific error messages
-			let errorMessage = error.message;
-			if (error.message.includes('empty content') || error.message.includes('Could not extract content')) {
+			let errorMessage = error.message || 'Unknown error occurred';
+			if (errorMessage.includes('empty content') || errorMessage.includes('Could not extract content')) {
 				errorMessage = 'Some files could not be processed. This may be because they are empty, corrupted, or in an unsupported format. For video/audio files, ensure transcription is enabled in your settings.';
-			} else if (error.message.includes('not supported for processing')) {
+			} else if (errorMessage.includes('not supported for processing')) {
 				errorMessage = 'Some file types are not supported for processing. Please try different file formats.';
-			} else if (error.message.includes('Media files (audio/video) are supported')) {
-				errorMessage = error.message;
+			} else if (errorMessage.includes('Media files (audio/video) are supported')) {
+				errorMessage = errorMessage;
+			} else if (errorMessage.includes('name \'uuid\' is not defined')) {
+				errorMessage = 'Server configuration error. Please try again or contact support.';
 			}
 			
 			toast.error(
@@ -802,9 +825,45 @@
 
 		if (res) {
 			knowledge = res;
+			
+			// Check for active sessions in the current knowledge base
+			if (knowledge.meta && knowledge.meta.processing_progress) {
+				console.log('KnowledgeBase: Found processing_progress in current knowledge base:', knowledge.meta.processing_progress);
+				
+				const progress = knowledge.meta.processing_progress;
+				const isActive = progress.status === 'processing' || progress.status === 'transcribing';
+				const isStale = (Date.now() - progress.last_updated * 1000) > 5 * 60 * 1000; // 5 minutes
+				
+				console.log('KnowledgeBase: Session status - active:', isActive, 'stale:', isStale, 'status:', progress.status);
+				
+				if (isActive && !isStale) {
+					console.log('KnowledgeBase: Resuming active session for current knowledge base:', knowledge.id);
+					
+                    // Create session in progress store (prefer full list when available)
+                    const fileList = (Array.isArray(progress.file_list) && progress.file_list.length > 0)
+                        ? progress.file_list
+                        : (progress.current_file ? [progress.current_file] : ['Processing...']);
+					progressStore.startSession(knowledge.id, progress.total_files || 1, fileList);
+					
+					// Resume polling
+					import('$lib/utils/polling.js').then(({ startProgressTracking }) => {
+						startProgressTracking(knowledge.id, () => {
+							console.log('KnowledgeBase: Session completed:', knowledge.id);
+							loadKnowledgeData(); // Refresh data when complete
+						}, (error) => {
+							console.error('KnowledgeBase: Session error:', error);
+						});
+					});
+				}
+			} else {
+				console.log('KnowledgeBase: No processing_progress found in current knowledge base');
+			}
 		} else {
 			goto('/workspace/knowledge');
 		}
+
+		// Also check for active sessions in other knowledge bases
+		await checkAndResumeDatabaseSessions();
 
 		const dropZone = document.querySelector('body');
 		dropZone?.addEventListener('dragover', onDragOver);
