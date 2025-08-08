@@ -178,12 +178,12 @@ deploy_to_cloud_run() {
         --region $REGION \
         --port 8080 \
         --allow-unauthenticated \
-        --memory 4Gi \
-        --cpu 2 \
-        --max-instances 10 \
+        --memory 8Gi \
+        --cpu 4 \
+        --max-instances 15 \
         --min-instances 0 \
-        --timeout 300 \
-        --concurrency 80 \
+        --timeout 1800 \
+        --concurrency 30 \
         --env-vars-file gcloud-env.yaml \
     
     print_success "Deployment completed!"

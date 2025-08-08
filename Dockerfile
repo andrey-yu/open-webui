@@ -37,7 +37,8 @@ ENV APP_BUILD_HASH=${BUILD_HASH}
 # Ensure SvelteKit is properly configured for static build
 RUN ls -la
 # Increase Node.js heap memory limit to prevent out of memory errors
-RUN NODE_OPTIONS="--max-old-space-size=4096" npm run build
+# Set NODE_ENV to production to ensure SvelteKit builds in production mode
+RUN NODE_ENV=production NODE_OPTIONS="--max-old-space-size=4096" npm run build
 
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base
